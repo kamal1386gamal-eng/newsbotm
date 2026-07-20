@@ -1,11 +1,10 @@
 import os
 import logging
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # تنظیمات اولیه
@@ -18,7 +17,10 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("متغیر محیطی BOT_TOKEN تنظیم نشده است!")
 
-CHANNEL_ID = "@spark_news_tel"  # شناسه کانال مقصد
+# ========================
+# شناسه کانال مقصد (به‌طور مستقیم در کد قرار داده شده)
+# ========================
+CHANNEL_ID = "@spark_news_tel"  # <--- لینک کانال شما مستقیماً اینجا قرار داده شده
 
 # ========================
 # تعریف حالت‌های مکالمه (FSM)
