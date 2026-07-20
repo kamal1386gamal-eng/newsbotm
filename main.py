@@ -17,10 +17,8 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("متغیر محیطی BOT_TOKEN تنظیم نشده است!")
 
-# ========================
-# شناسه کانال مقصد (به‌طور مستقیم در کد قرار داده شده)
-# ========================
-CHANNEL_ID = "@spark_news_tel"  # <--- لینک کانال شما مستقیماً اینجا قرار داده شده
+# شناسه کانال مقصد
+CHANNEL_ID = "@spark_news_tel"
 
 # ========================
 # تعریف حالت‌های مکالمه (FSM)
@@ -42,12 +40,13 @@ dp = Dispatcher(storage=storage)
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    """فرمان /start"""
+    """فرمان /start - فقط برای راهنمایی"""
     await state.set_state(Form.waiting_for_photo)
     await message.answer(
         "سلام! 👋\n"
         "یک عکس را برای من بفرستید تا پس از تأیید شما، آن را در کانال منتشر کنم.\n"
-        "برای لغو در هر مرحله، دستور /cancel را بفرستید."
+        "برای لغو در هر مرحله، دستور /cancel را بفرستید.\n\n"
+        "⚠️ توجه: دیگر نیازی به زدن /start نیست! مستقیماً عکس بفرستید."
     )
 
 
@@ -59,9 +58,12 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
     await message.answer("❌ عملیات لغو شد.")
 
 
-@dp.message(Form.waiting_for_photo, F.photo)
+@dp.message(F.photo)  # <--- این هندلر بدون نیاز به حالت، عکس را دریافت می‌کند
 async def handle_photo(message: types.Message, state: FSMContext):
-    """دریافت عکس و درخواست تأیید"""
+    """دریافت عکس (بدون نیاز به /start) و درخواست تأیید"""
+    # اگر کاربر در حالت نبود، آن را به حالت مناسب ببر
+    await state.set_state(Form.waiting_for_photo)
+
     # ذخیره اطلاعات عکس در state
     await state.update_data(
         chat_id=message.chat.id,
@@ -118,11 +120,12 @@ async def process_confirmation(callback: types.CallbackQuery, state: FSMContext)
     await state.clear()
 
 
-@dp.message(Form.waiting_for_photo)
+@dp.message()
 async def handle_invalid_input(message: types.Message):
-    """دریافت پیام غیرمنتظره در حالت انتظار عکس"""
+    """دریافت پیام غیرمنتظره (غیرعکس)"""
     await message.answer(
-        "لطفاً یک عکس بفرستید یا برای لغو، /cancel را بزنید."
+        "❌ لطفاً فقط یک عکس بفرستید.\n"
+        "برای راهنمایی، /start را بزنید."
     )
 
 
