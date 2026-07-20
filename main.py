@@ -20,7 +20,6 @@ ALLOWED_USER_ID = 8293164271
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# دیکشنری‌ها
 preview_data: Dict[tuple, Dict[str, Any]] = {}
 editing_state: Dict[int, tuple] = {}
 album_collector: Dict[str, Dict[str, Any]] = {}
@@ -101,11 +100,9 @@ async def delete_preview_messages(chat_id: int, main_msg_id: Optional[int], extr
         try: await bot.delete_message(chat_id, extra_msg_id)
         except Exception: pass
 
-# ---------- ارسال پیش‌نمایش کامل با مدیا ----------
 async def send_media_preview(reply_to: types.Message, media_type: str, media_data: dict, caption: str):
     full_caption = f"📸 پیش‌نمایش پست\n\n{caption if caption else '(بدون کپشن)'}"
     main_msg_id = extra_msg_id = None
-
     if media_type == "photo":
         msg = await reply_to.answer_photo(media_data["file_id"], caption=full_caption, reply_markup=preview_keyboard())
         main_msg_id = msg.message_id
@@ -134,10 +131,8 @@ async def send_media_preview(reply_to: types.Message, media_type: str, media_dat
     else:
         msg = await reply_to.answer("❌ نوع فایل پشتیبانی نمی‌شود.")
         main_msg_id = msg.message_id
-
     return {"main": main_msg_id, "extra": extra_msg_id}
 
-# ---------- ذخیره‌سازی اولیه پیش‌نمایش ----------
 async def create_preview(original_message: types.Message, media_type: str, media_data: dict, caption: str, album: bool = False):
     caption_text = caption if caption else '(بدون کپشن)'
     if album:
@@ -171,7 +166,7 @@ async def create_preview(original_message: types.Message, media_type: str, media
         "original_message_id": original_message.message_id,
     }
 
-# ---------- هندلرهای اولیه ----------
+# ---------- هندلرها ----------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if not is_allowed(message.from_user.id): return
@@ -223,7 +218,7 @@ async def handle_single_media(message: types.Message):
         caption = media_data.get("text", "")
     await create_preview(message, media_type, media_data, caption)
 
-# ---------- ویرایش کپشن (فقط fallback: حذف و ساخت مجدد) ----------
+# ---------- ویرایش کپشن ----------
 @dp.callback_query(F.data == "edit_caption")
 async def edit_caption_start(callback: types.CallbackQuery):
     if not is_allowed(callback.from_user.id): return
@@ -249,38 +244,51 @@ async def handle_text_for_edit(message: types.Message):
             return
 
         new_caption = message.text
-        # حذف پیش‌نمایش قدیمی
+        data["caption"] = new_caption
+        media_type = data["media_type"]
+        full_caption = f"📸 پیش‌نمایش پست\n\n{new_caption if new_caption else '(بدون کپشن)'}"
+
+        # اگر بشه کپشن رو مستقیماً ویرایش کرد (عکس، فیلم، فایل، صوت، صدا)
+        if media_type in ("photo", "video", "audio", "document", "voice"):
+            try:
+                await bot.edit_message_caption(
+                    chat_id=data["main_chat_id"],
+                    message_id=data["main_message_id"],
+                    caption=full_caption,
+                    reply_markup=preview_keyboard()
+                )
+                await message.answer("✅ کپشن با موفقیت ویرایش شد. از دکمه‌های زیر همون پیش‌نمایش استفاده کنید.")
+                return
+            except Exception as e:
+                logging.warning(f"ویرایش مستقیم ممکن نبود: {e}")
+
+        # برای video_note، آلبوم یا در صورت خطا: حذف و ساخت مجدد
         await delete_preview_messages(data["main_chat_id"], data["main_message_id"], data.get("extra_message_id"))
         del preview_data[store_key]
 
-        media_type = data["media_type"]
-        media_data = data["media_data"]
-        # ساختن پیش‌نمایش جدید با مدیا و کپشن جدید
         if media_type == "album":
             caption_text = new_caption if new_caption else '(بدون کپشن)'
-            text = f"📸 آلبوم ({len(media_data['items'])} آیتم)\n\n{caption_text}"
+            text = f"📸 آلبوم ({len(data['media_data']['items'])} آیتم)\n\n{caption_text}"
             msg = await message.answer(text, reply_markup=preview_keyboard())
             new_store_key = (msg.chat.id, msg.message_id)
             preview_data[new_store_key] = {
                 **data,
-                "caption": new_caption,
                 "main_chat_id": msg.chat.id,
                 "main_message_id": msg.message_id,
                 "extra_message_id": None,
             }
         else:
-            ids = await send_media_preview(message, media_type, media_data, new_caption)
+            ids = await send_media_preview(message, media_type, data["media_data"], new_caption)
             main_id = ids["main"]
             extra_id = ids.get("extra")
             new_store_key = (message.chat.id, extra_id) if extra_id else (message.chat.id, main_id)
             preview_data[new_store_key] = {
                 **data,
-                "caption": new_caption,
                 "main_chat_id": message.chat.id,
                 "main_message_id": main_id,
                 "extra_message_id": extra_id,
             }
-        await message.answer("✅ کپشن ویرایش شد. روی دکمه‌ی پیش‌نمایش جدید کلیک کنید.")
+        await message.answer("✅ کپشن ویرایش شد. پیش‌نمایش جدید را ببینید و دکمهٔ «پست کردن» را بزنید.")
     else:
         await message.answer("❌ لطفاً محتوای معتبر ارسال کنید یا از دکمه‌ها استفاده کنید.")
 
@@ -296,7 +304,6 @@ async def process_post_actions(callback: types.CallbackQuery):
         return
 
     await delete_preview_messages(data["main_chat_id"], data["main_message_id"], data.get("extra_message_id"))
-    # حذف پیام اصلی کاربر
     orig_chat = data.get("original_chat_id")
     orig_msg = data.get("original_message_id")
     if orig_chat and orig_msg:
@@ -352,7 +359,6 @@ async def other_messages(message: types.Message):
     if not is_allowed(message.from_user.id): return
     await message.answer("❌ لطفاً محتوای معتبر ارسال کنید.")
 
-# ---------- اجرا ----------
 async def main():
     await dp.start_polling(bot)
 
