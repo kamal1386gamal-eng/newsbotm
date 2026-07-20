@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from typing import Union, List, Dict, Any
 
 # تنظیمات اولیه
 logging.basicConfig(level=logging.INFO)
@@ -24,9 +25,10 @@ CHANNEL_ID = "@spark_news_tel"
 # تعریف حالت‌های مکالمه (FSM)
 # ========================
 class Form(StatesGroup):
-    waiting_for_photo = State()
+    waiting_for_media = State()
     showing_preview = State()
     waiting_for_caption = State()
+
 
 # ========================
 # راه‌اندازی ربات و دیسپچر
@@ -37,15 +39,88 @@ dp = Dispatcher(storage=storage)
 
 
 # ========================
+# توابع کمکی برای تشخیص نوع محتوا
+# ========================
+
+def get_media_type(message: types.Message) -> str:
+    """تشخیص نوع رسانه‌ی ارسال شده"""
+    if message.photo:
+        return "photo"
+    elif message.video:
+        return "video"
+    elif message.audio:
+        return "audio"
+    elif message.document:
+        return "document"
+    elif message.voice:
+        return "voice"
+    elif message.video_note:
+        return "video_note"
+    elif message.text:
+        return "text"
+    else:
+        return "unknown"
+
+
+def extract_media_from_message(message: types.Message) -> Dict[str, Any]:
+    """استخراج اطلاعات رسانه از پیام"""
+    media_data = {"type": get_media_type(message), "caption": message.caption or ""}
+    
+    if message.photo:
+        media_data["file_id"] = message.photo[-1].file_id
+    elif message.video:
+        media_data["file_id"] = message.video.file_id
+        media_data["duration"] = message.video.duration
+        media_data["width"] = message.video.width
+        media_data["height"] = message.video.height
+    elif message.audio:
+        media_data["file_id"] = message.audio.file_id
+        media_data["duration"] = message.audio.duration
+        media_data["performer"] = message.audio.performer
+        media_data["title"] = message.audio.title
+    elif message.document:
+        media_data["file_id"] = message.document.file_id
+        media_data["file_name"] = message.document.file_name
+    elif message.voice:
+        media_data["file_id"] = message.voice.file_id
+        media_data["duration"] = message.voice.duration
+    elif message.video_note:
+        media_data["file_id"] = message.video_note.file_id
+        media_data["duration"] = message.video_note.duration
+        media_data["length"] = message.video_note.length
+    elif message.text:
+        media_data["text"] = message.text
+    
+    return media_data
+
+
+def is_album(message: types.Message) -> bool:
+    """تشخیص اینکه آیا پیام بخشی از یک البوم است"""
+    return hasattr(message, 'media_group_id') and message.media_group_id is not None
+
+
+async def get_album_messages(message: types.Message) -> List[types.Message]:
+    """دریافت همه‌ی پیام‌های یک البوم (با استفاده از media_group_id)"""
+    if not is_album(message):
+        return [message]
+    
+    # متاسفانه aiogram به‌طور مستقیم البوم را پشتیبانی نمی‌کند
+    # باید از روش جایگزین استفاده کنیم: ذخیره‌ی همه در یک گروه
+    # در اینجا ما فقط یک پیام را ذخیره می‌کنیم و بعداً برای ارسال از InputMediaGroup استفاده می‌کنیم
+    return [message]  # موقتاً فقط یک پیام
+
+
+# ========================
 # هندلرها
 # ========================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    await state.set_state(Form.waiting_for_photo)
+    await state.set_state(Form.waiting_for_media)
     await message.answer(
         "سلام! 👋\n"
-        "یک عکس بفرستید تا پس از تأیید و ویرایش، در کانال منتشر شود.\n"
+        "هر نوع محتوایی (عکس، ویدیو، موسیقی، متن، البوم) بفرستید.\n"
+        "پس از تأیید و ویرایش (در صورت نیاز)، در کانال منتشر می‌شود.\n"
         "برای لغو، /cancel را بزنید."
     )
 
@@ -57,30 +132,80 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
     await message.answer("❌ عملیات لغو شد.")
 
 
-@dp.message(F.photo)
-async def handle_photo(message: types.Message, state: FSMContext):
-    """دریافت عکس و نمایش پیش‌نمایش"""
-    photo = message.photo[-1]
-    file_id = photo.file_id
-    caption = message.caption or ""
-
+@dp.message(F.photo | F.video | F.audio | F.document | F.voice | F.video_note | F.text)
+async def handle_media(message: types.Message, state: FSMContext):
+    """دریافت هر نوع محتوا و نمایش پیش‌نمایش"""
+    media_type = get_media_type(message)
+    media_data = extract_media_from_message(message)
+    
+    # ذخیره اطلاعات در state
     await state.update_data(
-        photo_file_id=file_id,
-        caption=caption,
+        media_type=media_type,
+        media_data=media_data,
+        is_album=is_album(message),
+        caption=message.caption or "",
     )
 
-    # ارسال پیش‌نمایش با دکمه‌ها
-    preview_message = await message.answer_photo(
-        photo=file_id,
-        caption=f"📸 **پیش‌نمایش پست**\n\n{caption if caption else '(بدون کپشن)'}",
-        reply_markup=preview_keyboard(),
-    )
-
+    # ارسال پیش‌نمایش بر اساس نوع رسانه
+    preview_message = await send_preview(message, media_type, media_data)
+    
     await state.update_data(
         preview_chat_id=preview_message.chat.id,
         preview_message_id=preview_message.message_id,
     )
     await state.set_state(Form.showing_preview)
+
+
+async def send_preview(message: types.Message, media_type: str, media_data: Dict[str, Any]) -> types.Message:
+    """ارسال پیش‌نمایش بر اساس نوع رسانه"""
+    caption = f"📸 **پیش‌نمایش پست**\n\n{media_data.get('caption', '') or '(بدون کپشن)'}"
+    
+    if media_type == "photo":
+        return await message.answer_photo(
+            photo=media_data["file_id"],
+            caption=caption,
+            reply_markup=preview_keyboard()
+        )
+    elif media_type == "video":
+        return await message.answer_video(
+            video=media_data["file_id"],
+            caption=caption,
+            reply_markup=preview_keyboard()
+        )
+    elif media_type == "audio":
+        return await message.answer_audio(
+            audio=media_data["file_id"],
+            caption=caption,
+            performer=media_data.get("performer"),
+            title=media_data.get("title"),
+            reply_markup=preview_keyboard()
+        )
+    elif media_type == "document":
+        return await message.answer_document(
+            document=media_data["file_id"],
+            caption=caption,
+            reply_markup=preview_keyboard()
+        )
+    elif media_type == "voice":
+        return await message.answer_voice(
+            voice=media_data["file_id"],
+            caption=caption,
+            reply_markup=preview_keyboard()
+        )
+    elif media_type == "video_note":
+        return await message.answer_video_note(
+            video_note=media_data["file_id"],
+            reply_markup=preview_keyboard()
+        )
+    elif media_type == "text":
+        # برای متن، یک پیام متنی با دکمه‌ها ارسال می‌کنیم
+        text_preview = f"📝 **پیش‌نمایش پست**\n\n{media_data.get('text', '')}"
+        return await message.answer(
+            text_preview,
+            reply_markup=preview_keyboard()
+        )
+    else:
+        return await message.answer("❌ نوع فایل پشتیبانی نمی‌شود.")
 
 
 @dp.callback_query(F.data.in_(["post", "cancel_post", "edit_caption"]), StateFilter(Form.showing_preview))
@@ -90,50 +215,101 @@ async def process_preview_actions(callback: types.CallbackQuery, state: FSMConte
 
     user_data = await state.get_data()
     if not user_data:
-        await callback.message.answer("متأسفم، داده‌ای پیدا نشد. لطفاً دوباره عکس را بفرستید.")
+        await callback.message.answer("متأسفم، داده‌ای پیدا نشد. لطفاً دوباره محتوا را بفرستید.")
         await state.clear()
         return
 
     if callback.data == "post":
         # ===== ارسال به کانال =====
-        try:
-            await bot.send_photo(
-                chat_id=CHANNEL_ID,
-                photo=user_data["photo_file_id"],
-                caption=user_data["caption"] if user_data["caption"] else None,
-            )
-            # ویرایش کپشن پیام پیش‌نمایش به جای edit_text
-            await bot.edit_message_caption(
-                chat_id=user_data["preview_chat_id"],
-                message_id=user_data["preview_message_id"],
-                caption="✅ **عکس با موفقیت در کانال منتشر شد.**",
-                reply_markup=None,  # حذف دکمه‌ها
-            )
-        except Exception as e:
-            logging.error(f"خطا در ارسال به کانال: {e}")
-            await callback.message.answer(
-                "❌ خطا در انتشار عکس. مطمئن شوید ربات در کانال ادمین است."
-            )
+        await send_to_channel(callback, user_data)
         await state.clear()
 
     elif callback.data == "cancel_post":
         # ===== لغو =====
-        await bot.edit_message_caption(
-            chat_id=user_data["preview_chat_id"],
-            message_id=user_data["preview_message_id"],
-            caption="❌ **انتشار لغو شد.**",
-            reply_markup=None,
-        )
+        await cancel_post(callback, user_data)
         await state.clear()
 
     elif callback.data == "edit_caption":
         # ===== ویرایش کپشن =====
-        # ارسال یک پیام جدید برای دریافت کپشن (نه ادیت کردن پیام عکس)
         await callback.message.answer(
             f"✏️ کپشن جدید را به‌صورت متن ارسال کنید.\n"
-            f"کپشن فعلی: {user_data['caption'] if user_data['caption'] else '(بدون کپشن)'}"
+            f"کپشن فعلی: {user_data.get('caption', '') or '(بدون کپشن)'}"
         )
         await state.set_state(Form.waiting_for_caption)
+
+
+async def send_to_channel(callback: types.CallbackQuery, user_data: Dict[str, Any]):
+    """ارسال محتوا به کانال بر اساس نوع رسانه"""
+    media_type = user_data["media_type"]
+    media_data = user_data["media_data"]
+    caption = user_data.get("caption", "")
+    
+    try:
+        if media_type == "photo":
+            await bot.send_photo(
+                chat_id=CHANNEL_ID,
+                photo=media_data["file_id"],
+                caption=caption if caption else None,
+            )
+        elif media_type == "video":
+            await bot.send_video(
+                chat_id=CHANNEL_ID,
+                video=media_data["file_id"],
+                caption=caption if caption else None,
+            )
+        elif media_type == "audio":
+            await bot.send_audio(
+                chat_id=CHANNEL_ID,
+                audio=media_data["file_id"],
+                caption=caption if caption else None,
+                performer=media_data.get("performer"),
+                title=media_data.get("title"),
+            )
+        elif media_type == "document":
+            await bot.send_document(
+                chat_id=CHANNEL_ID,
+                document=media_data["file_id"],
+                caption=caption if caption else None,
+            )
+        elif media_type == "voice":
+            await bot.send_voice(
+                chat_id=CHANNEL_ID,
+                voice=media_data["file_id"],
+                caption=caption if caption else None,
+            )
+        elif media_type == "video_note":
+            await bot.send_video_note(
+                chat_id=CHANNEL_ID,
+                video_note=media_data["file_id"],
+            )
+        elif media_type == "text":
+            await bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=media_data.get("text", ""),
+            )
+        
+        # به‌روزرسانی پیام پیش‌نمایش
+        await bot.edit_message_caption(
+            chat_id=user_data["preview_chat_id"],
+            message_id=user_data["preview_message_id"],
+            caption="✅ **محتوا با موفقیت در کانال منتشر شد.**",
+            reply_markup=None,
+        )
+    except Exception as e:
+        logging.error(f"خطا در ارسال به کانال: {e}")
+        await callback.message.answer(
+            "❌ خطا در انتشار. مطمئن شوید ربات در کانال ادمین است."
+        )
+
+
+async def cancel_post(callback: types.CallbackQuery, user_data: Dict[str, Any]):
+    """لغو انتشار و به‌روزرسانی پیش‌نمایش"""
+    await bot.edit_message_caption(
+        chat_id=user_data["preview_chat_id"],
+        message_id=user_data["preview_message_id"],
+        caption="❌ **انتشار لغو شد.**",
+        reply_markup=None,
+    )
 
 
 @dp.message(StateFilter(Form.waiting_for_caption), F.text)
@@ -143,22 +319,35 @@ async def handle_new_caption(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
 
     if not user_data:
-        await message.answer("متأسفم، داده‌ای پیدا نشد. لطفاً دوباره عکس را بفرستید.")
+        await message.answer("متأسفم، داده‌ای پیدا نشد. لطفاً دوباره محتوا را بفرستید.")
         await state.clear()
         return
 
-    # به‌روزرسانی کپشن
+    # به‌روزرسانی کپشن در state
     await state.update_data(caption=new_caption)
 
-    # ویرایش کپشن پیام پیش‌نمایش
+    # به‌روزرسانی پیش‌نمایش
     try:
-        await bot.edit_message_caption(
-            chat_id=user_data["preview_chat_id"],
-            message_id=user_data["preview_message_id"],
-            caption=f"📸 **پیش‌نمایش پست**\n\n{new_caption if new_caption else '(بدون کپشن)'}",
-            reply_markup=preview_keyboard(),  # دکمه‌ها دوباره نمایش داده می‌شوند
-        )
-        await message.answer("✅ کپشن به‌روزرسانی شد. پیش‌نمایش جدید را ببینید.")
+        media_type = user_data["media_type"]
+        if media_type in ["photo", "video", "audio", "document", "voice"]:
+            await bot.edit_message_caption(
+                chat_id=user_data["preview_chat_id"],
+                message_id=user_data["preview_message_id"],
+                caption=f"📸 **پیش‌نمایش پست**\n\n{new_caption if new_caption else '(بدون کپشن)'}",
+                reply_markup=preview_keyboard(),
+            )
+        elif media_type == "text":
+            await bot.edit_message_text(
+                chat_id=user_data["preview_chat_id"],
+                message_id=user_data["preview_message_id"],
+                text=f"📝 **پیش‌نمایش پست**\n\n{new_caption if new_caption else '(بدون کپشن)'}",
+                reply_markup=preview_keyboard(),
+            )
+        else:
+            # برای video_note که کپشن ندارد، پیام جدید ارسال می‌کنیم
+            await message.answer(f"📸 **پیش‌نمایش پست**\n\n{new_caption if new_caption else '(بدون کپشن)'}")
+        
+        await message.answer("✅ کپشن به‌روزرسانی شد.")
     except Exception as e:
         logging.error(f"خطا در ادیت: {e}")
         await message.answer("❌ خطا در به‌روزرسانی پیش‌نمایش.")
@@ -173,7 +362,10 @@ async def invalid_caption_input(message: types.Message):
 
 @dp.message()
 async def other_messages(message: types.Message):
-    await message.answer("❌ فقط عکس بفرستید. برای راهنمایی /start را بزنید.")
+    await message.answer(
+        "❌ فقط محتوای معتبر بفرستید (عکس، ویدیو، موسیقی، فایل، متن).\n"
+        "برای راهنمایی /start را بزنید."
+    )
 
 
 # ========================
