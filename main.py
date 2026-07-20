@@ -1,330 +1,145 @@
-import asyncio
 import os
-import re
-import time
-from typing import List, Optional, Dict
+import asyncio
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ConversationHandler, ContextTypes
 
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.storage.base import StorageKey
-from aiogram.types import (
-    Message, MessageEntity, InlineKeyboardMarkup, InlineKeyboardButton,
-    InputMediaPhoto, InputMediaVideo, CallbackQuery
-)
+# تنظیمات لاگ
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ═══════════════ تنظیمات از محیط ═══════════════
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("متغیر محیطی BOT_TOKEN تنظیم نشده است")
+# ========================
+# دریافت تنظیمات از محیط (Environment Variables)
+# ========================
+TOKEN = os.getenv("BOT_TOKEN")  # توکن را از Railway یا محیط دریافت کن
+if not TOKEN:
+    raise ValueError("متغیر محیطی BOT_TOKEN تنظیم نشده است!")
 
-CHANNEL = os.environ.get("CHANNEL", "@spark_news_tel")
-ALLOWED_USERS = list(map(int, os.environ.get("ALLOWED_USERS", "8293164271").split(",")))
-STATE_TTL = 600  # ثانیه
+CHANNEL_ID = "@spark_news_tel"  # شناسه کانال مقصد
 
-# ═══════════════ راه‌اندازی ربات ═══════════════
-bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+# حالات مکالمه
+WAITING_FORWARD, CONFIRMING = range(2)
 
-# ═══════════════ FSM ═══════════════
-class PostState(StatesGroup):
-    waiting_for_caption = State()
+# دیکشنری برای ذخیره‌ی موقت اطلاعات عکس هر کاربر
+user_data_store = {}
 
-# ═══════════════ دکمه‌های پیش‌نمایش ═══════════════
-def preview_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """فرمان /start"""
+    await update.message.reply_text(
+        "سلام! 👋\n"
+        "یک عکس را به من فوروارد کنید تا پس از تأیید شما، آن را در کانال منتشر کنم.\n"
+        "برای لغو در هر مرحله، دستور /cancel را بفرستید."
+    )
+    return WAITING_FORWARD
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """لغو عملیات"""
+    user_id = update.effective_user.id
+    user_data_store.pop(user_id, None)
+    await update.message.reply_text("❌ عملیات لغو شد.")
+    return ConversationHandler.END
+
+
+async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """دریافت عکس فورواردی"""
+    user = update.effective_user
+    message = update.message
+
+    # بررسی وجود عکس
+    if not message.photo:
+        await message.reply_text("لطفاً یک عکس فوروارد کنید (یا یک عکس معمولی بفرستید).")
+        return WAITING_FORWARD
+
+    # ذخیره اطلاعات عکس
+    user_data_store[user.id] = {
+        "chat_id": message.chat.id,
+        "message_id": message.message_id,
+    }
+
+    # دکمه‌های تأیید
+    keyboard = [
         [
-            InlineKeyboardButton(text="✅ تایید", callback_data="confirm"),
-            InlineKeyboardButton(text="✏️ ویرایش", callback_data="edit"),
-            InlineKeyboardButton(text="❌ لغو", callback_data="cancel")
+            InlineKeyboardButton("✅ بله، منتشر کن", callback_data="confirm"),
+            InlineKeyboardButton("❌ نه، لغو کن", callback_data="cancel"),
         ]
-    ])
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-# ═══════════════ توابع کمکی ═══════════════
-def is_allowed(user_id: int) -> bool:
-    return user_id in ALLOWED_USERS
-
-def get_media_type(msg: Message) -> Optional[str]:
-    if msg.photo:
-        return "photo"
-    if msg.video:
-        return "video"
-    if msg.animation:
-        return "animation"
-    if msg.document:
-        return "document"
-    if msg.audio:
-        return "audio"
-    if msg.voice:
-        return "voice"
-    if msg.video_note:
-        return "video_note"
-    return None
-
-def clean_caption(text: str) -> str:
-    """حذف @username و لینک‌های http/https از کپشن"""
-    text = re.sub(r'@\w+', '', text)
-    text = re.sub(r'https?://\S+', '', text)
-    return text.strip()
-
-def build_final_caption(text: Optional[str]) -> str:
-    """ساخت کپشن نهایی با لینک کانال"""
-    base = clean_caption(text) if text else ""
-    suffix = f"\n\n{CHANNEL}"
-    if not base:
-        return suffix
-    return base + suffix
-
-def get_caption_and_entities(msg: Message):
-    """استخراج کپشن و entities از پیام"""
-    if msg.caption:
-        return msg.caption, msg.caption_entities
-    if msg.text:
-        return msg.text, msg.entities
-    return "", None
-
-# ═══════════════ مدیریت آلبوم (ذخیره موقت) ═══════════════
-media_group_storage: Dict[int, Dict[str, Dict]] = {}
-
-async def process_media_group(user_id: int, messages: List[Message], state: FSMContext):
-    """پردازش آلبوم و نمایش پیش‌نمایش"""
-    first = messages[0]
-    caption, entities = get_caption_and_entities(first)
-    await state.update_data(
-        messages=messages,
-        caption=caption,
-        entities=entities,
-        published=False,
-        last_activity=time.time()
+    await message.reply_text(
+        "آیا این عکس را در کانال منتشر کنم؟",
+        reply_markup=reply_markup,
     )
-    await send_preview(user_id, state)
+    return CONFIRMING
 
-async def delayed_process(user_id: int, group_id: str):
-    """تأخیر ۱.۵ ثانیه‌ای برای جمع‌آوری همه‌ی پیام‌های آلبوم"""
-    await asyncio.sleep(1.5)
-    if user_id not in media_group_storage or group_id not in media_group_storage[user_id]:
-        return
-    store = media_group_storage[user_id][group_id]
-    messages = sorted(store["messages"], key=lambda m: m.message_id)
 
-    state = FSMContext(
-        storage=dp.storage,
-        key=StorageKey(bot_id=bot.id, user_id=user_id, chat_id=user_id)
-    )
-    await process_media_group(user_id, messages, state)
+async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """پردازش دکمه‌های تأیید/لغو"""
+    query = update.callback_query
+    await query.answer()
 
-    del media_group_storage[user_id][group_id]
-    if not media_group_storage[user_id]:
-        del media_group_storage[user_id]
-
-# ═══════════════ ارسال پیش‌نمایش ═══════════════
-async def send_single_media_preview(user_id: int, msg: Message, caption: str, entities, markup):
-    """ارسال یک رسانه به‌عنوان پیش‌نمایش"""
-    media_type = get_media_type(msg)
-    if media_type == "photo":
-        return await bot.send_photo(user_id, msg.photo[-1].file_id, caption=caption, caption_entities=entities, reply_markup=markup)
-    elif media_type == "video":
-        return await bot.send_video(user_id, msg.video.file_id, caption=caption, caption_entities=entities, reply_markup=markup)
-    elif media_type == "animation":
-        return await bot.send_animation(user_id, msg.animation.file_id, caption=caption, caption_entities=entities, reply_markup=markup)
-    elif media_type == "document":
-        return await bot.send_document(user_id, msg.document.file_id, caption=caption, caption_entities=entities, reply_markup=markup)
-    elif media_type == "audio":
-        return await bot.send_audio(user_id, msg.audio.file_id, caption=caption, caption_entities=entities, reply_markup=markup)
-    elif media_type == "voice":
-        return await bot.send_voice(user_id, msg.voice.file_id, caption=caption, caption_entities=entities, reply_markup=markup)
-    elif media_type == "video_note":
-        return await bot.send_video_note(user_id, msg.video_note.file_id, reply_markup=markup)
-    return None
-
-def build_media_group_input(messages: List[Message], caption: str, entities) -> List:
-    """ساخت ورودی‌های آلبوم برای ارسال هم‌زمان"""
-    inputs = []
-    for i, msg in enumerate(messages):
-        media_type = get_media_type(msg)
-        if media_type == "photo":
-            file_id = msg.photo[-1].file_id
-            if i == 0 and caption:
-                inputs.append(InputMediaPhoto(media=file_id, caption=caption, caption_entities=entities))
-            else:
-                inputs.append(InputMediaPhoto(media=file_id))
-        elif media_type == "video":
-            file_id = msg.video.file_id
-            if i == 0 and caption:
-                inputs.append(InputMediaVideo(media=file_id, caption=caption, caption_entities=entities))
-            else:
-                inputs.append(InputMediaVideo(media=file_id))
-    return inputs
-
-async def send_preview(user_id: int, state: FSMContext):
-    """حذف پیش‌نمایش قبلی و نمایش پیش‌نمایش جدید"""
-    data = await state.get_data()
-    old_msg_id = data.get("preview_msg_id")
-    if old_msg_id:
-        try:
-            await bot.delete_message(user_id, old_msg_id)
-        except:
-            pass
-
-    messages = data["messages"]
-    caption = data["caption"]
-    entities = data.get("entities")
-    kb = preview_keyboard()
-
-    if len(messages) > 1:
-        media_inputs = build_media_group_input(messages, caption, entities)
-        if not media_inputs:
-            await bot.send_message(user_id, "❌ آلبوم خالی است.")
-            return
-        await bot.send_media_group(user_id, media_inputs)
-        preview_msg = await bot.send_message(user_id, "📌 برای انتشار از دکمه‌های زیر استفاده کنید:", reply_markup=kb)
-    else:
-        msg = messages[0]
-        preview_msg = await send_single_media_preview(user_id, msg, caption, entities, kb)
-
-    if preview_msg:
-        await state.update_data(preview_msg_id=preview_msg.message_id)
-
-# ═══════════════ هندلر: فوروارد پیام‌ها ═══════════════
-@dp.message(F.forward_from | F.forward_from_chat)
-async def handle_forward(msg: Message, state: FSMContext):
-    user_id = msg.from_user.id
-    if not is_allowed(user_id):
-        return
-
-    data = await state.get_data()
-    if data and time.time() - data.get("last_activity", 0) > STATE_TTL:
-        await state.clear()
-        await msg.answer("⏰ جلسه قبلی منقضی شد. لطفاً دوباره فوروارد کنید.")
-        return
-
-    if msg.media_group_id:
-        group_id = msg.media_group_id
-        if user_id not in media_group_storage:
-            media_group_storage[user_id] = {}
-        if group_id not in media_group_storage[user_id]:
-            media_group_storage[user_id][group_id] = {"messages": [], "task": None}
-
-        store = media_group_storage[user_id][group_id]
-        store["messages"].append(msg)
-
-        if store["task"]:
-            store["task"].cancel()
-        store["task"] = asyncio.create_task(delayed_process(user_id, group_id))
-        await state.update_data(last_activity=time.time())
-        return
-
-    caption, entities = get_caption_and_entities(msg)
-    await state.update_data(
-        messages=[msg],
-        caption=caption,
-        entities=entities,
-        published=False,
-        last_activity=time.time()
-    )
-    await send_preview(user_id, state)
-
-# ═══════════════ هندلر: دکمه‌های پیش‌نمایش ═══════════════
-@dp.callback_query(F.data.in_({"confirm", "edit", "cancel"}))
-async def handle_preview_buttons(call: CallbackQuery, state: FSMContext):
-    user_id = call.from_user.id
-    if not is_allowed(user_id):
-        await call.answer("⛔ دسترسی مجاز نیست", show_alert=True)
-        return
-
-    await call.answer()
-    data = await state.get_data()
+    user_id = update.effective_user.id
+    data = user_data_store.get(user_id)
 
     if not data:
-        # ارسال پیام جدید به جای ویرایش پیام بدون متن
-        await call.message.answer("⛔ داده‌ای یافت نشد. دوباره فوروارد کنید.")
-        return
+        await query.edit_message_text("متأسفم، داده‌ای برای انتشار پیدا نشد. لطفاً دوباره عکس را فوروارد کنید.")
+        return ConversationHandler.END
 
-    if call.data == "confirm":
-        if data.get("published"):
-            await call.message.answer("⚠️ این پست قبلاً منتشر شده است.")
-            return
-
-        await state.update_data(published=True)
-        messages = data["messages"]
-        caption = data["caption"]
-        entities = data.get("entities")
-
+    if query.data == "confirm":
         try:
-            if len(messages) > 1:
-                media_inputs = build_media_group_input(messages, caption, entities)
-                if media_inputs:
-                    await bot.send_media_group(CHANNEL, media_inputs)
-            else:
-                msg = messages[0]
-                final_caption = build_final_caption(caption)
-                media_type = get_media_type(msg)
-                if media_type == "photo":
-                    await bot.send_photo(CHANNEL, msg.photo[-1].file_id, caption=final_caption)
-                elif media_type == "video":
-                    await bot.send_video(CHANNEL, msg.video.file_id, caption=final_caption)
-                elif media_type == "animation":
-                    await bot.send_animation(CHANNEL, msg.animation.file_id, caption=final_caption)
-                elif media_type == "document":
-                    await bot.send_document(CHANNEL, msg.document.file_id, caption=final_caption)
-                elif media_type == "audio":
-                    await bot.send_audio(CHANNEL, msg.audio.file_id, caption=final_caption)
-                elif media_type == "voice":
-                    await bot.send_voice(CHANNEL, msg.voice.file_id, caption=final_caption)
-                elif media_type == "video_note":
-                    await bot.send_video_note(CHANNEL, msg.video_note.file_id)
-
-            try:
-                await call.message.delete()
-            except:
-                pass
-            await bot.send_message(user_id, "✅ پست با موفقیت در کانال منتشر شد.")
+            # فوروارد کردن عکس به کانال
+            await context.bot.forward_message(
+                chat_id=CHANNEL_ID,
+                from_chat_id=data["chat_id"],
+                message_id=data["message_id"],
+            )
+            await query.edit_message_text("✅ عکس با موفقیت در کانال منتشر شد.")
         except Exception as e:
-            await call.message.answer(f"❌ خطا در انتشار: {e}")
-        finally:
-            await state.clear()
+            logger.error(f"خطا در ارسال به کانال: {e}")
+            await query.edit_message_text(
+                "❌ خطا در انتشار عکس. مطمئن شوید که ربات در کانال ادمین است و شناسه کانال صحیح است."
+            )
+    else:  # cancel
+        await query.edit_message_text("❌ انتشار لغو شد.")
 
-    elif call.data == "edit":
-        await state.set_state(PostState.waiting_for_caption)
-        await call.message.answer("✏️ کپشن جدید را به‌صورت یک پیام متنی ارسال کنید.")
+    # پاک کردن داده‌های کاربر
+    user_data_store.pop(user_id, None)
+    return ConversationHandler.END
 
-    elif call.data == "cancel":
-        preview_id = data.get("preview_msg_id")
-        if preview_id:
-            try:
-                await bot.delete_message(user_id, preview_id)
-            except:
-                pass
-        await state.clear()
-        await call.message.answer("❌ عملیات لغو شد.")
 
-# ═══════════════ هندلر: دریافت کپشن جدید (حالت ویرایش) ═══════════════
-@dp.message(PostState.waiting_for_caption)
-async def receive_new_caption(msg: Message, state: FSMContext):
-    user_id = msg.from_user.id
-    if not is_allowed(user_id):
-        return
+async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """در صورت دریافت پیام غیرمنتظره"""
+    await update.message.reply_text(
+        "لطفاً یک عکس فوروارد کنید یا از دکمه‌های تأیید/لغو استفاده کنید.\n"
+        "برای خروج، /cancel را بزنید."
+    )
+    return WAITING_FORWARD
 
-    new_caption = msg.text or msg.caption or ""
-    try:
-        await msg.delete()
-    except:
-        pass
 
-    await state.update_data(caption=new_caption, entities=None, last_activity=time.time())
-    try:
-        await send_preview(user_id, state)
-    except Exception as e:
-        await bot.send_message(user_id, f"❌ خطا در نمایش پیش‌نمایش: {e}")
+def main() -> None:
+    """اجرای اصلی ربات"""
+    application = Application.builder().token(TOKEN).build()
 
-# ═══════════════ راه‌اندازی ═══════════════
-async def main():
-    print("🤖 ربات در حال اجرا است...")
-    # پاک کردن Webhook برای اطمینان از دریافت آپدیت‌ها از طریق polling
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    # تنظیم مکالمه
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            WAITING_FORWARD: [
+                MessageHandler(filters.PHOTO, handle_forward),
+                CommandHandler("cancel", cancel),
+            ],
+            CONFIRMING: [
+                CallbackQueryHandler(confirm_callback, pattern="^(confirm|cancel)$"),
+                CommandHandler("cancel", cancel),
+            ],
+        },
+        fallbacks=[MessageHandler(filters.ALL, fallback)],
+    )
+
+    application.add_handler(conv_handler)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
