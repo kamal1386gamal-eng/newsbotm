@@ -2,7 +2,7 @@ import os
 import re
 import asyncio
 import logging
-from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -20,7 +20,7 @@ if not TOKEN:
     raise ValueError("❌ متغیر محیطی BOT_TOKEN تنظیم نشده است.")
 
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@spark_news_tel")
-ALLOWED_USER_ID = 8293164271        # فقط این کاربر مجاز است
+ALLOWED_USER_ID = 8293164271   # فقط این کاربر مجاز است
 
 # -------------------------------------------------------------------
 # FSM
@@ -34,20 +34,6 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=storage)
 
 # -------------------------------------------------------------------
-# Middleware برای محدود کردن کاربران
-# -------------------------------------------------------------------
-class AccessMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event: types.TelegramObject, data: dict):
-        user_id = None
-        if hasattr(event, 'from_user') and event.from_user:
-            user_id = event.from_user.id
-        if user_id != ALLOWED_USER_ID:
-            return  # بی‌صدا ignore می‌شود
-        return await handler(event, data)
-
-dp.update.outer_middleware(AccessMiddleware())
-
-# -------------------------------------------------------------------
 # جمع‌آوری آلبوم‌ها
 # -------------------------------------------------------------------
 album_collector: Dict[str, Dict[str, Any]] = {}
@@ -55,6 +41,9 @@ album_collector: Dict[str, Dict[str, Any]] = {}
 # -------------------------------------------------------------------
 # توابع کمکی
 # -------------------------------------------------------------------
+def is_allowed(user_id: int) -> bool:
+    return user_id == ALLOWED_USER_ID
+
 def get_media_type(message: types.Message) -> str:
     if message.photo:        return "photo"
     if message.video:        return "video"
@@ -150,7 +139,6 @@ async def delete_preview_messages(chat_id: int, main_msg_id: Optional[int], extr
         except Exception as e: logging.warning(f"Could not delete extra: {e}")
 
 def process_caption_for_publishing(caption: str) -> str:
-    # حذف همه لینک‌ها، منشن‌ها و هشتگ‌ها
     cleaned = re.sub(r"https?://\S+", "", caption)
     cleaned = re.sub(r"@\w+", "", cleaned)
     cleaned = re.sub(r"#\w+", "", cleaned)
@@ -209,16 +197,18 @@ async def process_album(media_group_id: str, chat_id: int, bot_instance: Bot, st
     await state.set_state(Form.showing_preview)
 
 # -------------------------------------------------------------------
-# هندلرها
+# هندلرها (همگی با شرط مجاز بودن کاربر)
 # -------------------------------------------------------------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
+    if not is_allowed(message.from_user.id): return
     await state.clear()
-    await message.answer("سلام! فقط شما مجاز به استفاده هستید. هر محتوایی بفرستید (آلبوم هم پشتیبانی می‌شود). /cancel برای لغو.")
+    await message.answer("سلام! فقط شما مجاز هستید. هر محتوایی بفرستید (آلبوم هم پشتیبانی می‌شود). /cancel برای لغو.")
 
 @dp.message(Command("cancel"))
 @dp.message(F.text.casefold() == "cancel")
 async def cmd_cancel(message: types.Message, state: FSMContext):
+    if not is_allowed(message.from_user.id): return
     data = await state.get_data()
     await delete_preview_messages(data.get("preview_chat_id"), data.get("preview_main_message_id"), data.get("preview_extra_message_id"))
     await state.clear()
@@ -226,6 +216,7 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
 
 @dp.message(F.media_group_id)
 async def handle_album_item(message: types.Message, state: FSMContext):
+    if not is_allowed(message.from_user.id): return
     media_group_id = message.media_group_id
     if media_group_id not in album_collector:
         album_collector[media_group_id] = {"messages": [], "timer": None}
@@ -236,6 +227,7 @@ async def handle_album_item(message: types.Message, state: FSMContext):
 
 @dp.message(F.photo | F.video | F.audio | F.document | F.voice | F.video_note | F.text, ~F.media_group_id)
 async def handle_single_media(message: types.Message, state: FSMContext):
+    if not is_allowed(message.from_user.id): return
     current_state = await state.get_state()
     if current_state is not None:
         data = await state.get_data()
@@ -259,6 +251,7 @@ async def handle_single_media(message: types.Message, state: FSMContext):
 
 @dp.message(StateFilter(Form.waiting_for_caption), F.text)
 async def handle_new_caption(message: types.Message, state: FSMContext):
+    if not is_allowed(message.from_user.id): return
     new_caption = message.text
     user_data = await state.get_data()
     if not user_data:
@@ -307,6 +300,7 @@ async def handle_new_caption(message: types.Message, state: FSMContext):
 
 @dp.message(StateFilter(Form.waiting_for_caption))
 async def abort_caption_and_new_media(message: types.Message, state: FSMContext):
+    if not is_allowed(message.from_user.id): return
     await message.answer("⚠️ ویرایش کپشن لغو شد. محتوای جدید دریافت شد.")
     data = await state.get_data()
     await delete_preview_messages(data.get("preview_chat_id"), data.get("preview_main_message_id"), data.get("preview_extra_message_id"))
@@ -318,6 +312,7 @@ async def abort_caption_and_new_media(message: types.Message, state: FSMContext)
 
 @dp.callback_query(F.data.in_(["post", "cancel_post", "edit_caption"]), StateFilter(Form.showing_preview))
 async def process_preview_actions(callback: types.CallbackQuery, state: FSMContext):
+    if not is_allowed(callback.from_user.id): return
     await callback.answer()
     user_data = await state.get_data()
     if not user_data:
@@ -378,7 +373,8 @@ async def process_preview_actions(callback: types.CallbackQuery, state: FSMConte
 
 @dp.message()
 async def other_messages(message: types.Message):
-    # این بخش فقط برای کاربران مجاز اجرا می‌شود، در غیر این صورت میدلور متوقف کرده است
+    # فقط برای کاربر مجاز پیام می‌دهد (در غیر این صورت برگشت خورده)
+    if not is_allowed(message.from_user.id): return
     await message.answer("❌ لطفاً محتوای معتبر ارسال کنید.")
 
 # -------------------------------------------------------------------
