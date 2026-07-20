@@ -19,7 +19,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("متغیر محیطی BOT_TOKEN تنظیم نشده است!")
 
-CHANNEL_ID = os.getenv("CHANNEL_ID", "@spark_news_tel")  # کانال پیش‌فرض
+CHANNEL_ID = os.getenv("CHANNEL_ID", "@spark_news_tel")  # شناسه کانال (برای ارسال)
 
 # ========================
 # تعریف حالت‌های مکالمه (FSM)
@@ -186,14 +186,22 @@ async def delete_preview_messages(chat_id: int, main_msg_id: Optional[int], extr
 
 def process_caption_for_publishing(caption: str) -> str:
     """
-    حذف تمام لینک‌ها (http, https, @mentions) و اضافه کردن @spark_news_tel در انتها.
+    حذف تمام لینک‌ها (http, https, @mentions)، هشتگ‌ها (#hashtag)
+    و اضافه کردن https://t.me/spark_news_tel در انتها.
     """
-    cleaned = re.sub(r"https?://\S+", "", caption)   # حذف URLها
-    cleaned = re.sub(r"@\w+", "", cleaned)           # حذف @mentionها
+    # حذف URLها
+    cleaned = re.sub(r"https?://\S+", "", caption)
+    # حذف @mentionها
+    cleaned = re.sub(r"@\w+", "", cleaned)
+    # حذف هشتگ‌ها
+    cleaned = re.sub(r"#\w+", "", cleaned)
+    # حذف فاصله‌های اضافی
     cleaned = cleaned.strip()
+    # اگر متنی باقی ماند، یک خط فاصله بگذاریم
     if cleaned:
         cleaned += "\n"
-    cleaned += "@spark_news_tel"
+    # افزودن لینک دقیق کانال
+    cleaned += "https://t.me/spark_news_tel"
     return cleaned
 
 
@@ -214,7 +222,6 @@ def preview_keyboard():
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
-    # فقط راهنما، state رو هم پاک می‌کنیم تا اگر قبلاً چیزی بود از بین بره
     await state.clear()
     await message.answer(
         "سلام! 👋\n"
@@ -256,7 +263,7 @@ async def handle_new_caption(message: types.Message, state: FSMContext):
     caption_text = new_caption if new_caption else '(بدون کپشن)'
     full_caption = f"📸 **پیش‌نمایش پست**\n\n{caption_text}"
 
-    # تلاش برای ویرایش کپشن (بدون حذف پیش‌نمایش) برای انواعی که support می‌کنند
+    # تلاش برای ویرایش کپشن (بدون حذف پیش‌نمایش)
     if media_type in ("photo", "video", "audio", "document", "voice"):
         try:
             await bot.edit_message_caption(
@@ -276,7 +283,7 @@ async def handle_new_caption(message: types.Message, state: FSMContext):
     # fallback: حذف و ساخت پیش‌نمایش جدید (برای video_note و text)
     await delete_preview_messages(chat_id, main_msg_id, extra_msg_id)
     if media_type == "text":
-        media_data["text"] = new_caption   # خود متن جدید میشه
+        media_data["text"] = new_caption
 
     new_info = await send_preview(message, media_type, media_data, new_caption)
     await state.update_data(
@@ -307,7 +314,6 @@ async def abort_caption_and_new_media(message: types.Message, state: FSMContext)
 # --- دریافت محتوای جدید (در هر شرایطی: state خالی یا showing_preview) ---
 @dp.message(F.photo | F.video | F.audio | F.document | F.voice | F.video_note | F.text)
 async def handle_any_media(message: types.Message, state: FSMContext):
-    # اگر state از قبل وجود دارد (showing_preview)، اول پیش‌نمایش قبلی را پاک کن
     current_state = await state.get_state()
     if current_state is not None:
         data = await state.get_data()
@@ -317,12 +323,10 @@ async def handle_any_media(message: types.Message, state: FSMContext):
             data.get("preview_extra_message_id")
         )
         await state.clear()
-
     await process_new_media(message, state)
 
 
 async def process_new_media(message: types.Message, state: FSMContext):
-    """پردازش یک محتوای جدید و ایجاد پیش‌نمایش"""
     media_type = get_media_type(message)
     media_data = extract_media_from_message(message)
     caption = message.caption or ""
@@ -355,10 +359,10 @@ async def process_preview_actions(callback: types.CallbackQuery, state: FSMConte
         return
 
     if callback.data == "post":
-        # پردازش خودکار کپشن: حذف همه لینک‌ها و افزودن @spark_news_tel
+        # پردازش خودکار کپشن: حذف لینک‌ها، منشن‌ها، هشتگ‌ها و افزودن لینک کانال
         original_caption = user_data.get("caption", "")
         final_caption = process_caption_for_publishing(original_caption)
-        user_data["caption"] = final_caption  # به‌روزرسانی برای send_to_channel
+        user_data["caption"] = final_caption
 
         await send_to_channel(callback, user_data)
         await state.clear()
@@ -391,7 +395,7 @@ async def other_messages(message: types.Message):
 async def send_to_channel(callback: types.CallbackQuery, user_data: Dict[str, Any]):
     media_type = user_data["media_type"]
     media_data = user_data["media_data"]
-    caption = user_data.get("caption", "")   # اینجا دیگه حاوی لینک اجباری است
+    caption = user_data.get("caption", "")   # اینجا دیگه شامل لینک کانال و بدون هشتگ است
     chat_id = user_data["preview_chat_id"]
     main_msg_id = user_data.get("preview_main_message_id")
     extra_msg_id = user_data.get("preview_extra_message_id")
@@ -416,7 +420,6 @@ async def send_to_channel(callback: types.CallbackQuery, user_data: Dict[str, An
         elif media_type == "text":
             await bot.send_message(CHANNEL_ID, caption, parse_mode="Markdown")  # caption = متن نهایی با لینک
 
-        # حذف پیش‌نمایش
         await delete_preview_messages(chat_id, main_msg_id, extra_msg_id)
         await callback.message.answer("✅ **محتوا با موفقیت در کانال منتشر شد.**")
     except Exception as e:
