@@ -4,7 +4,7 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext  # فقط برای پاک‌سازی state قدیمی (اختیاری)
+from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from typing import Dict, Any, List, Optional
@@ -22,19 +22,14 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # -------------------------------------------------------------------
-# دیکشنری‌های اصلی (جایگزین FSM)
+# دیکشنری‌های اصلی
 # -------------------------------------------------------------------
-# اطلاعات هر پیش‌نمایش: کلید = (chat_id, message_id) پیام پیش‌نمایش
 preview_data: Dict[tuple, Dict[str, Any]] = {}
-
-# کاربرانی که در حال ویرایش کپشن یک پیش‌نمایش خاص هستند: کلید = user_id
 editing_state: Dict[int, tuple] = {}
-
-# جمع‌آوری آلبوم‌ها (بدون تغییر)
 album_collector: Dict[str, Dict[str, Any]] = {}
 
 # -------------------------------------------------------------------
-# توابع کمکی (بدون تغییر در منطق اصلی)
+# توابع کمکی
 # -------------------------------------------------------------------
 def is_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
@@ -78,7 +73,6 @@ def extract_media_from_message(message: types.Message) -> Dict[str, Any]:
     return media_data
 
 def process_caption_for_publishing(caption: str) -> str:
-    # همون تابع جدید که لینک موجود را جایگزین می‌کند
     if re.search(r"https?://\S+", caption):
         caption = re.sub(r"https?://\S+", "@spark_news_tel", caption, count=1)
     caption = re.sub(r"https?://\S+", "", caption)
@@ -111,63 +105,73 @@ async def delete_preview_messages(chat_id: int, main_msg_id: Optional[int], extr
         except Exception as e: logging.warning(f"Could not delete extra: {e}")
 
 # -------------------------------------------------------------------
-# ارسال پیش‌نمایش و ذخیره‌سازی داده‌ها
+# ارسال پیش‌نمایش و ذخیره‌سازی (حالا با ذخیرهٔ پیام اصلی)
 # -------------------------------------------------------------------
-async def create_preview(message: types.Message, media_type: str, media_data: Dict[str, Any], caption: str, album: bool = False):
+async def create_preview(
+    original_message: types.Message,   # پیام فروارد شدهٔ اصلی
+    media_type: str,
+    media_data: Dict[str, Any],
+    caption: str,
+    album: bool = False
+):
     caption_text = caption if caption else '(بدون کپشن)'
     if album:
         text = f"📸 آلبوم ({len(media_data['items'])} آیتم)\n\n{caption_text}"
-        msg = await message.answer(text, reply_markup=preview_keyboard())
-        preview_data[(msg.chat.id, msg.message_id)] = {
+        msg = await original_message.answer(text, reply_markup=preview_keyboard())
+        store_key = (msg.chat.id, msg.message_id)
+        preview_data[store_key] = {
             "media_type": "album",
             "media_data": media_data,
             "caption": caption,
             "main_chat_id": msg.chat.id,
             "main_message_id": msg.message_id,
             "extra_message_id": None,
+            "original_chat_id": original_message.chat.id,
+            "original_message_id": original_message.message_id,
         }
         return
-    # تکی
+
     full_caption = f"📸 پیش‌نمایش پست\n\n{caption_text}"
     main_msg_id = extra_msg_id = None
     if media_type == "photo":
-        msg = await message.answer_photo(media_data["file_id"], caption=full_caption, reply_markup=preview_keyboard())
+        msg = await original_message.answer_photo(media_data["file_id"], caption=full_caption, reply_markup=preview_keyboard())
         main_msg_id = msg.message_id
     elif media_type == "video":
-        msg = await message.answer_video(media_data["file_id"], caption=full_caption, reply_markup=preview_keyboard())
+        msg = await original_message.answer_video(media_data["file_id"], caption=full_caption, reply_markup=preview_keyboard())
         main_msg_id = msg.message_id
     elif media_type == "audio":
-        msg = await message.answer_audio(media_data["file_id"], caption=full_caption,
-                                         performer=media_data.get("performer"), title=media_data.get("title"),
-                                         reply_markup=preview_keyboard())
+        msg = await original_message.answer_audio(media_data["file_id"], caption=full_caption,
+                                                  performer=media_data.get("performer"), title=media_data.get("title"),
+                                                  reply_markup=preview_keyboard())
         main_msg_id = msg.message_id
     elif media_type == "document":
-        msg = await message.answer_document(media_data["file_id"], caption=full_caption, reply_markup=preview_keyboard())
+        msg = await original_message.answer_document(media_data["file_id"], caption=full_caption, reply_markup=preview_keyboard())
         main_msg_id = msg.message_id
     elif media_type == "voice":
-        msg = await message.answer_voice(media_data["file_id"], caption=full_caption, reply_markup=preview_keyboard())
+        msg = await original_message.answer_voice(media_data["file_id"], caption=full_caption, reply_markup=preview_keyboard())
         main_msg_id = msg.message_id
     elif media_type == "video_note":
-        vn_msg = await message.answer_video_note(video_note=media_data["file_id"])
-        txt_msg = await message.answer(full_caption, reply_markup=preview_keyboard())
+        vn_msg = await original_message.answer_video_note(video_note=media_data["file_id"])
+        txt_msg = await original_message.answer(full_caption, reply_markup=preview_keyboard())
         main_msg_id = vn_msg.message_id
         extra_msg_id = txt_msg.message_id
     elif media_type == "text":
-        msg = await message.answer(f"📝 پیش‌نمایش پست\n\n{caption_text}", reply_markup=preview_keyboard())
+        msg = await original_message.answer(f"📝 پیش‌نمایش پست\n\n{caption_text}", reply_markup=preview_keyboard())
         main_msg_id = msg.message_id
     else:
-        msg = await message.answer("❌ نوع فایل پشتیبانی نمی‌شود.")
+        msg = await original_message.answer("❌ نوع فایل پشتیبانی نمی‌شود.")
         main_msg_id = msg.message_id
 
-    # ذخیره‌سازی اطلاعات
-    store_key = (message.chat.id, extra_msg_id) if extra_msg_id else (message.chat.id, main_msg_id)
+    store_key = (original_message.chat.id, extra_msg_id) if extra_msg_id else (original_message.chat.id, main_msg_id)
     preview_data[store_key] = {
         "media_type": media_type,
         "media_data": media_data,
         "caption": caption,
-        "main_chat_id": message.chat.id,
+        "main_chat_id": original_message.chat.id,
         "main_message_id": main_msg_id,
         "extra_message_id": extra_msg_id,
+        "original_chat_id": original_message.chat.id,
+        "original_message_id": original_message.message_id,
     }
 
 # -------------------------------------------------------------------
@@ -180,9 +184,7 @@ async def cmd_start(message: types.Message):
 
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message):
-    # حذف آخرین پیش‌نمایش فعال (اختیاری)
     if not is_allowed(message.from_user.id): return
-    # برای پاک‌سازی همه پیش‌نمایش‌ها می‌تونیم یه لیست از کلیدها داشته باشیم، ولی فعلاً از متد ساده استفاده می‌کنیم
     await message.answer("اگر پیش‌نمایشی باز است، از دکمه «لغو» زیر آن استفاده کنید.")
 
 @dp.message(F.media_group_id)
@@ -199,8 +201,7 @@ async def handle_album_item(message: types.Message):
 async def process_album(media_group_id: str, chat_id: int, trigger_message: types.Message):
     await asyncio.sleep(1)
     group_data = album_collector.pop(media_group_id, None)
-    if not group_data:
-        return
+    if not group_data: return
     messages: List[types.Message] = group_data["messages"]
     messages.sort(key=lambda m: m.message_id)
 
@@ -217,8 +218,7 @@ async def process_album(media_group_id: str, chat_id: int, trigger_message: type
             items.append(item)
             if not caption and msg.caption:
                 caption = msg.caption
-    if not items:
-        return
+    if not items: return
 
     album_data = {"type": "album", "items": items, "caption": caption}
     await create_preview(trigger_message, "album", album_data, caption, album=True)
@@ -240,13 +240,11 @@ async def handle_single_media(message: types.Message):
 async def edit_caption_start(callback: types.CallbackQuery):
     if not is_allowed(callback.from_user.id): return
     await callback.answer()
-    # پیدا کردن دیتای مربوط به این پیام
     store_key = (callback.message.chat.id, callback.message.message_id)
     data = preview_data.get(store_key)
     if not data:
         await callback.message.answer("⚠️ داده‌های این پست یافت نشد.")
         return
-    # تنظیم وضعیت ویرایش
     editing_state[callback.from_user.id] = store_key
     current_caption = data.get("caption", "")
     await callback.message.answer(f"✏️ کپشن جدید را بفرستید.\nفعلی: {current_caption or '(خالی)'}")
@@ -270,7 +268,6 @@ async def handle_text_for_edit(message: types.Message):
         main_msg_id = data["main_message_id"]
         extra_msg_id = data.get("extra_message_id")
 
-        # تلاش برای ویرایش پیام پیش‌نمایش (بدون حذف)
         if media_type == "album":
             caption_text = new_caption if new_caption else '(بدون کپشن)'
             new_text = f"📸 آلبوم ({len(media_data['items'])} آیتم)\n\n{caption_text}"
@@ -294,17 +291,19 @@ async def handle_text_for_edit(message: types.Message):
             except Exception as e:
                 logging.warning(f"edit_message_caption failed: {e}")
 
-        # fallback: حذف و ساخت مجدد
+        # fallback: حذف و ساخت مجدد (پیام اصلی حذف نمی‌شود)
         await delete_preview_messages(chat_id, main_msg_id, extra_msg_id)
         if media_type == "text":
             media_data["text"] = new_caption
+        # از پیام اصلی برای ساخت پیش‌نمایش دوباره استفاده می‌کنیم، اما چون ممکنه پیام اصلی پاک نشده باشد، همان را پاس بدهیم
+        # ولی ما پیام اصلی را ذخیره نکرده‌ایم که بتوانیم دوباره استفاده کنیم، بنابراین از message فعلی به عنوان fallback
         await create_preview(message, media_type, media_data, new_caption)
         await message.answer("✅ کپشن ویرایش شد. پیش‌نمایش جدید را ببینید.")
     else:
         await message.answer("❌ لطفاً محتوای معتبر ارسال کنید یا از دکمه‌ها استفاده کنید.")
 
 # -------------------------------------------------------------------
-# دکمه‌های پست و لغو
+# دکمه‌های پست و لغو (حالا پیام اصلی هم حذف می‌شود)
 # -------------------------------------------------------------------
 @dp.callback_query(F.data.in_(["post", "cancel_post"]))
 async def process_post_actions(callback: types.CallbackQuery):
@@ -316,8 +315,17 @@ async def process_post_actions(callback: types.CallbackQuery):
         await callback.message.answer("⚠️ داده‌های این پست یافت نشد.")
         return
 
+    # حذف پیش‌نمایش
+    await delete_preview_messages(data["main_chat_id"], data["main_message_id"], data.get("extra_message_id"))
+
+    # حذف پیام اصلی فروارد شده
+    orig_chat = data.get("original_chat_id")
+    orig_msg = data.get("original_message_id")
+    if orig_chat and orig_msg:
+        try: await bot.delete_message(orig_chat, orig_msg)
+        except Exception: pass
+
     if callback.data == "cancel_post":
-        await delete_preview_messages(data["main_chat_id"], data["main_message_id"], data.get("extra_message_id"))
         await callback.message.answer("❌ انتشار لغو شد.")
         return
 
@@ -357,7 +365,6 @@ async def process_post_actions(callback: types.CallbackQuery):
             elif media_type == "text":
                 await bot.send_message(CHANNEL_ID, final_caption)
 
-        await delete_preview_messages(data["main_chat_id"], data["main_message_id"], data.get("extra_message_id"))
         await callback.message.answer("✅ محتوا با موفقیت در کانال منتشر شد.")
     except Exception as e:
         logging.error(f"خطا در انتشار: {e}")
