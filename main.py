@@ -15,8 +15,8 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("BOT_TOKEN is not set")
 
-CHANNEL_ID = "@spark_news_tel"          # <-- کانال شما
-ALLOWED_USER_ID = 8293164271            # <-- فقط این ادمین
+CHANNEL_ID = "@spark_news_tel"
+ALLOWED_USER_ID = 8293164271
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -25,8 +25,6 @@ post_data: Dict[tuple, Dict[str, Any]] = {}
 edit_state: Dict[int, tuple] = {}
 album_buffer: Dict[str, Dict[str, Any]] = {}
 
-
-# ══════════════ توابع کمکی ══════════════
 
 def is_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
@@ -65,12 +63,11 @@ async def delete_msg(chat_id: int, msg_id: Optional[int]):
             pass
 
 async def auto_delete_msg(chat_id: int, msg_id: int, delay: int = 3):
-    """حذف خودکار یک پیام پس از چند ثانیه"""
     await asyncio.sleep(delay)
     await delete_msg(chat_id, msg_id)
 
 
-# ══════════════ ساخت پیش‌نمایش اولیه (ورودی کاربر) ══════════════
+# ══════════ پیش‌نمایش اولیه ══════════
 
 async def create_single_preview(message: types.Message):
     original_caption = message.caption or message.text or ""
@@ -83,10 +80,9 @@ async def create_single_preview(message: types.Message):
             message_id=message.message_id
         )
     except Exception as e:
-        logging.warning(f"copy_message failed: {e}, using fallback")
+        logging.warning(f"copy_message failed: {e}")
         copied = None
 
-    # ویدئو نوت
     if message.video_note:
         if copied is None:
             await message.answer("⚠️ امکان کپی ویدئو نوت وجود ندارد. لطفاً خود پیام را مستقیماً ارسال کنید.")
@@ -107,7 +103,6 @@ async def create_single_preview(message: types.Message):
         }
         return
 
-    # متن ساده
     if message.text and not (message.photo or message.video or message.audio or message.document or message.voice):
         if copied is None:
             new_msg = await message.answer(full_caption, reply_markup=three_buttons())
@@ -135,10 +130,9 @@ async def create_single_preview(message: types.Message):
         }
         return
 
-    # رسانه (عکس، ویدئو، فایل، صدا، ویس)
+    # رسانه
     file_id = None
     media_type = None
-
     if copied is None:
         if message.photo:
             m = await message.answer_photo(message.photo[-1].file_id, caption=full_caption, reply_markup=three_buttons())
@@ -173,7 +167,7 @@ async def create_single_preview(message: types.Message):
                 reply_markup=three_buttons()
             )
         except Exception as e:
-            logging.warning(f"edit_message_caption failed: {e}, using fallback")
+            logging.warning(f"edit_message_caption failed: {e}")
             await delete_msg(message.chat.id, copied.message_id)
             if message.photo:
                 m = await message.answer_photo(message.photo[-1].file_id, caption=full_caption, reply_markup=three_buttons())
@@ -228,7 +222,7 @@ async def create_single_preview(message: types.Message):
     }
 
 
-# ══════════════ مدیریت آلبوم ══════════════
+# ══════════ آلبوم ══════════
 
 async def start_album_timer(gid: str, chat_id: int):
     await asyncio.sleep(1.5)
@@ -240,13 +234,11 @@ async def start_album_timer(gid: str, chat_id: int):
 async def on_album_part(message: types.Message):
     if not is_allowed(message.from_user.id): return
     edit_state.pop(message.from_user.id, None)
-
     gid = message.media_group_id
     if gid not in album_buffer:
         album_buffer[gid] = {"messages": [], "timer": None}
     buf = album_buffer[gid]
     buf["messages"].append(message)
-
     if buf["timer"] and not buf["timer"].done():
         buf["timer"].cancel()
     buf["timer"] = asyncio.create_task(start_album_timer(gid, message.chat.id))
@@ -256,7 +248,6 @@ async def process_album(gid: str, chat_id: int):
     if not buf: return
     msgs: List[types.Message] = buf["messages"]
     msgs.sort(key=lambda m: m.message_id)
-
     items = []
     caption = ""
     copied_ids = []
@@ -265,11 +256,8 @@ async def process_album(gid: str, chat_id: int):
             items.append({"type": "photo", "file_id": m.photo[-1].file_id})
         elif m.video:
             items.append({
-                "type": "video",
-                "file_id": m.video.file_id,
-                "duration": m.video.duration,
-                "width": m.video.width,
-                "height": m.video.height
+                "type": "video", "file_id": m.video.file_id,
+                "duration": m.video.duration, "width": m.video.width, "height": m.video.height
             })
         else:
             continue
@@ -280,26 +268,17 @@ async def process_album(gid: str, chat_id: int):
             copied_ids.append(c.message_id)
         except Exception as e:
             logging.warning(f"Failed to copy album part: {e}")
-
     if not items:
         return
-
     full_caption = f"📸 آلبوم ({len(items)} آیتم)\n\n{caption if caption else '(بدون کپشن)'}"
     btn_msg = await bot.send_message(chat_id, full_caption, reply_markup=three_buttons())
     store_key = (chat_id, btn_msg.message_id)
     post_data[store_key] = {
-        "type": "album",
-        "items": items,
-        "copied_msg_ids": copied_ids,
-        "caption": caption,
-        "chat_id": chat_id,
-        "btn_msg_id": btn_msg.message_id,
-        "original_message_ids": [m.message_id for m in msgs],
-        "clean_msg_ids": []
+        "type": "album", "items": items, "copied_msg_ids": copied_ids,
+        "caption": caption, "chat_id": chat_id, "btn_msg_id": btn_msg.message_id,
+        "original_message_ids": [m.message_id for m in msgs], "clean_msg_ids": []
     }
 
-
-# ══════════════ دریافت تک‌رسانه ══════════════
 
 @dp.message(F.photo | F.video | F.audio | F.document | F.voice | F.video_note | F.text, ~F.media_group_id)
 async def handle_single(message: types.Message):
@@ -308,7 +287,7 @@ async def handle_single(message: types.Message):
     await create_single_preview(message)
 
 
-# ══════════════ ویرایش کپشن (بازسازی کامل پیش‌نمایش) ══════════════
+# ══════════ ویرایش کپشن ══════════
 
 @dp.callback_query(F.data == "edit_caption")
 async def edit_caption_start(callback: types.CallbackQuery):
@@ -339,11 +318,9 @@ async def handle_new_caption(message: types.Message):
     new_caption = message.text
     data["caption"] = new_caption
     full_preview = f"📸 پیش‌نمایش پست\n\n{new_caption if new_caption else '(بدون کپشن)'}"
-    # final_caption = process_caption(new_caption)   # فقط برای انتشار نهایی استفاده می‌شود
-
     chat_id = data["chat_id"]
 
-    # حذف پیش‌نمایش دکمه‌دار قبلی
+    # حذف پیش‌نمایش قبلی
     if data["type"] == "video_note":
         await delete_msg(chat_id, data["vn_copied_id"])
         await delete_msg(chat_id, data["text_msg_id"])
@@ -353,18 +330,16 @@ async def handle_new_caption(message: types.Message):
         await delete_msg(chat_id, data["btn_msg_id"])
     elif data["type"] == "text":
         await delete_msg(chat_id, data["copied_msg_id"])
-    else:  # رسانه
+    else:
         await delete_msg(chat_id, data["copied_msg_id"])
 
-    # حذف پیش‌نمایش‌های تمیز قدیمی (امنیتی)
     for old_id in data.get("clean_msg_ids", []):
         await delete_msg(chat_id, old_id)
     data["clean_msg_ids"] = []
 
-    # ساخت پیش‌نمایش جدید با محتوا + کپشن جدید + دکمه‌ها
+    # بازسازی پیش‌نمایش با محتوای اصلی و دکمه‌ها
     try:
         if data["type"] == "album":
-            # کپی دوباره آیتم‌های آلبوم
             new_copied_ids = []
             for m_id in data["original_message_ids"]:
                 try:
@@ -399,7 +374,7 @@ async def handle_new_caption(message: types.Message):
             data["copied_msg_id"] = new_msg.message_id
             del post_data[key]
 
-        else:  # رسانه (عکس، ویدئو، فایل، صدا، ویس)
+        else:  # رسانه (عکس / ویدئو / فایل ...)
             file_id = data.get("file_id")
             media_type = data.get("media_type")
             if file_id and media_type:
@@ -421,7 +396,7 @@ async def handle_new_caption(message: types.Message):
                 data["copied_msg_id"] = new_msg.message_id
                 del post_data[key]
             else:
-                # file_id نداریم (نباید اتفاق بیفتد)، کل پیام اصلی را کپی می‌کنیم
+                # در صورت نبود file_id، پیام اصلی را با کپشن جدید کپی می‌کنیم
                 new_copy = await bot.copy_message(
                     chat_id,
                     from_chat_id=chat_id,
@@ -434,18 +409,17 @@ async def handle_new_caption(message: types.Message):
                 data["copied_msg_id"] = new_copy.message_id
                 del post_data[key]
 
-        # پیام تأیید موقت
         confirm_msg = await message.answer("✅ کپشن ویرایش شد.")
         asyncio.create_task(auto_delete_msg(chat_id, confirm_msg.message_id, 3))
+        logging.info(f"Rebuilt preview for user {uid}, new key={new_key}")
 
     except Exception as e:
         logging.error(f"Rebuild preview failed: {e}")
         await message.answer("❌ نتوانستم پیش‌نمایش جدید را بسازم. لطفاً پست را لغو و دوباره ارسال کنید.")
-        edit_state[uid] = key   # بازگردانی حالت ویرایش برای تلاش دوباره
-        return
+        edit_state[uid] = key
 
 
-# ══════════════ انتشار یا لغو ══════════════
+# ══════════ انتشار / لغو ══════════
 
 @dp.callback_query(F.data.in_(["post", "cancel_post"]))
 async def handle_post_or_cancel(callback: types.CallbackQuery):
@@ -459,7 +433,6 @@ async def handle_post_or_cancel(callback: types.CallbackQuery):
 
     if callback.data == "cancel_post":
         await callback.message.answer("❌ انتشار لغو شد.")
-        # پاک‌سازی
         for msg_id in data.get("clean_msg_ids", []):
             await delete_msg(data["chat_id"], msg_id)
         if data["type"] == "video_note":
@@ -469,11 +442,8 @@ async def handle_post_or_cancel(callback: types.CallbackQuery):
             for cid in data.get("copied_msg_ids", []):
                 await delete_msg(data["chat_id"], cid)
             await delete_msg(data["chat_id"], data["btn_msg_id"])
-        elif data["type"] == "text":
-            await delete_msg(data["chat_id"], data["copied_msg_id"])
         else:
             await delete_msg(data["chat_id"], data["copied_msg_id"])
-        # پیام‌های اصلی کاربر
         if data["type"] == "album":
             for oid in data.get("original_message_ids", []):
                 await delete_msg(data["chat_id"], oid)
@@ -481,7 +451,6 @@ async def handle_post_or_cancel(callback: types.CallbackQuery):
             await delete_msg(data["chat_id"], data.get("original_message_id"))
         return
 
-    # انتشار در کانال
     final_caption = process_caption(data.get("caption", ""))
     try:
         if data["type"] == "album":
@@ -489,22 +458,19 @@ async def handle_post_or_cancel(callback: types.CallbackQuery):
             for idx, item in enumerate(data["items"]):
                 cap = final_caption if idx == 0 else ""
                 if item["type"] == "photo":
-                    media_list.append(types.InputMediaPhoto(media=item["file_id"], caption=cap))
+                    media_list.append(InputMediaPhoto(media=item["file_id"], caption=cap))
                 else:
-                    media_list.append(types.InputMediaVideo(media=item["file_id"], caption=cap,
-                                                            duration=item.get("duration"),
-                                                            width=item.get("width"),
-                                                            height=item.get("height")))
+                    media_list.append(InputMediaVideo(media=item["file_id"], caption=cap,
+                                                      duration=item.get("duration"),
+                                                      width=item.get("width"),
+                                                      height=item.get("height")))
             await bot.send_media_group(CHANNEL_ID, media=media_list)
         elif data["type"] == "video_note":
             await bot.copy_message(CHANNEL_ID, from_chat_id=data["chat_id"], message_id=data["original_message_id"])
             if final_caption:
                 await bot.send_message(CHANNEL_ID, final_caption)
         elif data["type"] == "text":
-            if final_caption:
-                await bot.send_message(CHANNEL_ID, final_caption)
-            else:
-                await bot.send_message(CHANNEL_ID, " ")
+            await bot.send_message(CHANNEL_ID, final_caption if final_caption else " ")
         else:
             file_id = data.get("file_id")
             media_type = data.get("media_type")
@@ -538,8 +504,6 @@ async def handle_post_or_cancel(callback: types.CallbackQuery):
         for cid in data.get("copied_msg_ids", []):
             await delete_msg(data["chat_id"], cid)
         await delete_msg(data["chat_id"], data["btn_msg_id"])
-    elif data["type"] == "text":
-        await delete_msg(data["chat_id"], data["copied_msg_id"])
     else:
         await delete_msg(data["chat_id"], data["copied_msg_id"])
     if data["type"] == "album":
