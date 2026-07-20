@@ -1,7 +1,7 @@
 import os
 import logging
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -66,7 +66,7 @@ async def handle_photo(message: types.Message, state: FSMContext):
     # دریافت اطلاعات عکس
     photo = message.photo[-1]  # بهترین کیفیت
     file_id = photo.file_id
-    caption = message.caption or ""  # کپشن موجود (اگر باشد)
+    caption = message.caption or ""
 
     # ذخیره اطلاعات در state
     await state.update_data(
