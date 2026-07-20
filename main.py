@@ -92,8 +92,11 @@ def extract_media_from_message(message: types.Message) -> Dict[str, Any]:
     return media_data
 
 
-async def send_preview_message(target_message: types.Message, media_type: str, media_data: Dict[str, Any], caption: str) -> types.Message:
-    """ارسال یک پیام پیش‌نمایش با دکمه‌ها"""
+async def send_preview(target_message: types.Message, media_type: str, media_data: Dict[str, Any], caption: str) -> types.Message:
+    """
+    ارسال پیش‌نمایش با همان فایل و کپشن جدید
+    این تابع دقیقاً همان فایل را با کپشن جدید و دکمه‌ها ارسال می‌کند
+    """
     caption_text = caption if caption else '(بدون کپشن)'
     full_caption = f"📸 **پیش‌نمایش پست**\n\n{caption_text}"
     
@@ -130,18 +133,15 @@ async def send_preview_message(target_message: types.Message, media_type: str, m
             reply_markup=preview_keyboard()
         )
     elif media_type == "video_note":
-        # ویدیو نوتی کپشن ندارد، فقط خود ویدیو را نمایش می‌دهیم و سپس یک پیام متنی با کپشن جداگانه می‌فرستیم
-        video_msg = await target_message.answer_video_note(
+        # ویدیو نوتی کپشن نمی‌پذیرد، بنابراین خود ویدیو و سپس یک پیام متنی جداگانه با کپشن و دکمه‌ها می‌فرستیم
+        await target_message.answer_video_note(
             video_note=media_data["file_id"],
             reply_markup=None
         )
-        # برای ویدیو نوتی، کپشن را به‌صورت یک پیام متنی جداگانه با دکمه‌ها می‌فرستیم
-        caption_msg = await target_message.answer(
+        return await target_message.answer(
             full_caption,
             reply_markup=preview_keyboard()
         )
-        # ترکیب دو پیام در یک شیء برای ذخیره‌سازی (فقط آخرین پیام را برمی‌گردانیم)
-        return caption_msg
     elif media_type == "text":
         return await target_message.answer(
             f"📝 **پیش‌نمایش پست**\n\n{media_data.get('text', '')}",
@@ -179,7 +179,7 @@ async def handle_media(message: types.Message, state: FSMContext):
     media_data = extract_media_from_message(message)
     caption = message.caption or ""
 
-    # ذخیره در state
+    # ذخیره اطلاعات در state
     await state.update_data(
         media_type=media_type,
         media_data=media_data,
@@ -187,9 +187,8 @@ async def handle_media(message: types.Message, state: FSMContext):
     )
 
     # ارسال پیش‌نمایش
-    preview_msg = await send_preview_message(message, media_type, media_data, caption)
+    preview_msg = await send_preview(message, media_type, media_data, caption)
     
-    # ذخیره شناسه پیام پیش‌نمایش
     await state.update_data(
         preview_chat_id=preview_msg.chat.id,
         preview_message_id=preview_msg.message_id,
@@ -247,8 +246,8 @@ async def handle_new_caption(message: types.Message, state: FSMContext):
     media_type = user_data["media_type"]
     media_data = user_data["media_data"]
     
-    # ارسال پیام جدید با همان فایل و کپشن جدید
-    new_preview = await send_preview_message(message, media_type, media_data, new_caption)
+    # ارسال مجدد همان فایل با کپشن جدید و دکمه‌ها
+    new_preview = await send_preview(message, media_type, media_data, new_caption)
     
     # به‌روزرسانی شناسه پیام پیش‌نمایش در state
     await state.update_data(
@@ -256,7 +255,7 @@ async def handle_new_caption(message: types.Message, state: FSMContext):
         preview_message_id=new_preview.message_id,
     )
 
-    await message.answer("✅ کپشن به‌روزرسانی شد. پیش‌نمایش جدید را مشاهده کنید.")
+    await message.answer("✅ کپشن با موفقیت به‌روزرسانی شد. پیش‌نمایش جدید را مشاهده کنید.")
     await state.set_state(Form.showing_preview)
 
 
@@ -296,7 +295,6 @@ async def send_to_channel(callback: types.CallbackQuery, user_data: Dict[str, An
             await bot.send_voice(CHANNEL_ID, media_data["file_id"], caption=caption if caption else None)
         elif media_type == "video_note":
             await bot.send_video_note(CHANNEL_ID, media_data["file_id"])
-            # برای ویدیو نوتی، کپشن را جداگانه می‌فرستیم
             if caption:
                 await bot.send_message(CHANNEL_ID, caption)
         elif media_type == "text":
@@ -312,6 +310,8 @@ async def send_to_channel(callback: types.CallbackQuery, user_data: Dict[str, An
             )
         except:
             pass
+
+        await callback.message.answer("✅ **محتوا با موفقیت در کانال منتشر شد.**")
 
     except Exception as e:
         logging.error(f"خطا در ارسال به کانال: {e}")
