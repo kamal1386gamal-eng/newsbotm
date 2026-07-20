@@ -4,7 +4,6 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from typing import Dict, Any, List, Optional
@@ -21,16 +20,12 @@ ALLOWED_USER_ID = 8293164271
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# -------------------------------------------------------------------
-# دیکشنری‌های اصلی
-# -------------------------------------------------------------------
+# دیکشنری‌ها
 preview_data: Dict[tuple, Dict[str, Any]] = {}
 editing_state: Dict[int, tuple] = {}
 album_collector: Dict[str, Dict[str, Any]] = {}
 
-# -------------------------------------------------------------------
-# توابع کمکی
-# -------------------------------------------------------------------
+# ---------- توابع کمکی ----------
 def is_allowed(user_id: int) -> bool:
     return user_id == ALLOWED_USER_ID
 
@@ -73,6 +68,8 @@ def extract_media_from_message(message: types.Message) -> Dict[str, Any]:
     return media_data
 
 def process_caption_for_publishing(caption: str) -> str:
+    if not caption:
+        caption = ""
     if re.search(r"https?://\S+", caption):
         caption = re.sub(r"https?://\S+", "@spark_news_tel", caption, count=1)
     caption = re.sub(r"https?://\S+", "", caption)
@@ -99,17 +96,16 @@ def preview_keyboard():
 async def delete_preview_messages(chat_id: int, main_msg_id: Optional[int], extra_msg_id: Optional[int] = None):
     if main_msg_id:
         try: await bot.delete_message(chat_id, main_msg_id)
-        except Exception as e: logging.warning(f"Could not delete main: {e}")
+        except Exception: pass
     if extra_msg_id:
         try: await bot.delete_message(chat_id, extra_msg_id)
-        except Exception as e: logging.warning(f"Could not delete extra: {e}")
+        except Exception: pass
 
-# -------------------------------------------------------------------
-# تابع کمکی: ارسال پیش‌نمایش با مدیا
-# -------------------------------------------------------------------
+# ---------- ارسال پیش‌نمایش کامل با مدیا ----------
 async def send_media_preview(reply_to: types.Message, media_type: str, media_data: dict, caption: str):
     full_caption = f"📸 پیش‌نمایش پست\n\n{caption if caption else '(بدون کپشن)'}"
     main_msg_id = extra_msg_id = None
+
     if media_type == "photo":
         msg = await reply_to.answer_photo(media_data["file_id"], caption=full_caption, reply_markup=preview_keyboard())
         main_msg_id = msg.message_id
@@ -138,18 +134,11 @@ async def send_media_preview(reply_to: types.Message, media_type: str, media_dat
     else:
         msg = await reply_to.answer("❌ نوع فایل پشتیبانی نمی‌شود.")
         main_msg_id = msg.message_id
+
     return {"main": main_msg_id, "extra": extra_msg_id}
 
-# -------------------------------------------------------------------
-# ارسال پیش‌نمایش و ذخیره‌سازی
-# -------------------------------------------------------------------
-async def create_preview(
-    original_message: types.Message,
-    media_type: str,
-    media_data: Dict[str, Any],
-    caption: str,
-    album: bool = False
-):
+# ---------- ذخیره‌سازی اولیه پیش‌نمایش ----------
+async def create_preview(original_message: types.Message, media_type: str, media_data: dict, caption: str, album: bool = False):
     caption_text = caption if caption else '(بدون کپشن)'
     if album:
         text = f"📸 آلبوم ({len(media_data['items'])} آیتم)\n\n{caption_text}"
@@ -182,18 +171,11 @@ async def create_preview(
         "original_message_id": original_message.message_id,
     }
 
-# -------------------------------------------------------------------
-# هندلرها
-# -------------------------------------------------------------------
+# ---------- هندلرهای اولیه ----------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if not is_allowed(message.from_user.id): return
-    await message.answer("سلام! هر محتوایی بفرستید. چند پست همزمان می‌توانند پیش‌نمایش داشته باشند. /cancel برای لغو.")
-
-@dp.message(Command("cancel"))
-async def cmd_cancel(message: types.Message):
-    if not is_allowed(message.from_user.id): return
-    await message.answer("اگر پیش‌نمایشی باز است، از دکمه «لغو» زیر آن استفاده کنید.")
+    await message.answer("سلام! هر محتوایی بفرستید.")
 
 @dp.message(F.media_group_id)
 async def handle_album_item(message: types.Message):
@@ -241,10 +223,7 @@ async def handle_single_media(message: types.Message):
         caption = media_data.get("text", "")
     await create_preview(message, media_type, media_data, caption)
 
-# -------------------------------------------------------------------
-# ویرایش کپشن (روش ترکیبی: ویرایش مستقیم برای عکس/فیلم/فایل/صدا،
-# و حذف+ساخت مجدد برای video_note و آلبوم)
-# -------------------------------------------------------------------
+# ---------- ویرایش کپشن (فقط fallback: حذف و ساخت مجدد) ----------
 @dp.callback_query(F.data == "edit_caption")
 async def edit_caption_start(callback: types.CallbackQuery):
     if not is_allowed(callback.from_user.id): return
@@ -270,57 +249,42 @@ async def handle_text_for_edit(message: types.Message):
             return
 
         new_caption = message.text
-        data["caption"] = new_caption
-        media_type = data["media_type"]
-        caption_text = new_caption if new_caption else '(بدون کپشن)'
-        full_caption = f"📸 پیش‌نمایش پست\n\n{caption_text}"
-
-        # اگر بشه کپشن رو مستقیم ویرایش کرد (عکس، فیلم، فایل، صوت، صدا)
-        if media_type in ("photo", "video", "audio", "document", "voice"):
-            try:
-                await bot.edit_message_caption(
-                    chat_id=data["main_chat_id"],
-                    message_id=data["main_message_id"],
-                    caption=full_caption,
-                    reply_markup=preview_keyboard()
-                )
-                await message.answer("✅ کپشن با موفقیت ویرایش شد.")
-                return
-            except Exception as e:
-                logging.warning(f"ویرایش مستقیم کپشن ممکن نبود: {e}")
-
-        # برای video_note، آلبوم یا در صورت خطا: حذف و ساخت مجدد
+        # حذف پیش‌نمایش قدیمی
         await delete_preview_messages(data["main_chat_id"], data["main_message_id"], data.get("extra_message_id"))
         del preview_data[store_key]
 
+        media_type = data["media_type"]
+        media_data = data["media_data"]
+        # ساختن پیش‌نمایش جدید با مدیا و کپشن جدید
         if media_type == "album":
-            text = f"📸 آلبوم ({len(data['media_data']['items'])} آیتم)\n\n{caption_text}"
+            caption_text = new_caption if new_caption else '(بدون کپشن)'
+            text = f"📸 آلبوم ({len(media_data['items'])} آیتم)\n\n{caption_text}"
             msg = await message.answer(text, reply_markup=preview_keyboard())
             new_store_key = (msg.chat.id, msg.message_id)
             preview_data[new_store_key] = {
                 **data,
+                "caption": new_caption,
                 "main_chat_id": msg.chat.id,
                 "main_message_id": msg.message_id,
                 "extra_message_id": None,
             }
         else:
-            ids = await send_media_preview(message, media_type, data["media_data"], new_caption)
+            ids = await send_media_preview(message, media_type, media_data, new_caption)
             main_id = ids["main"]
             extra_id = ids.get("extra")
             new_store_key = (message.chat.id, extra_id) if extra_id else (message.chat.id, main_id)
             preview_data[new_store_key] = {
                 **data,
+                "caption": new_caption,
                 "main_chat_id": message.chat.id,
                 "main_message_id": main_id,
                 "extra_message_id": extra_id,
             }
-        await message.answer("✅ کپشن ویرایش شد. پیش‌نمایش جدید را ببینید.")
+        await message.answer("✅ کپشن ویرایش شد. روی دکمه‌ی پیش‌نمایش جدید کلیک کنید.")
     else:
         await message.answer("❌ لطفاً محتوای معتبر ارسال کنید یا از دکمه‌ها استفاده کنید.")
 
-# -------------------------------------------------------------------
-# دکمه‌های پست و لغو
-# -------------------------------------------------------------------
+# ---------- انتشار یا لغو ----------
 @dp.callback_query(F.data.in_(["post", "cancel_post"]))
 async def process_post_actions(callback: types.CallbackQuery):
     if not is_allowed(callback.from_user.id): return
@@ -331,10 +295,8 @@ async def process_post_actions(callback: types.CallbackQuery):
         await callback.message.answer("⚠️ داده‌های این پست یافت نشد.")
         return
 
-    # حذف پیش‌نمایش
     await delete_preview_messages(data["main_chat_id"], data["main_message_id"], data.get("extra_message_id"))
-
-    # حذف پیام اصلی فروارد شده
+    # حذف پیام اصلی کاربر
     orig_chat = data.get("original_chat_id")
     orig_msg = data.get("original_message_id")
     if orig_chat and orig_msg:
@@ -345,7 +307,6 @@ async def process_post_actions(callback: types.CallbackQuery):
         await callback.message.answer("❌ انتشار لغو شد.")
         return
 
-    # post
     media_type = data["media_type"]
     media_data = data["media_data"]
     caption = data.get("caption", "")
@@ -384,16 +345,14 @@ async def process_post_actions(callback: types.CallbackQuery):
         await callback.message.answer("✅ محتوا با موفقیت در کانال منتشر شد.")
     except Exception as e:
         logging.error(f"خطا در انتشار: {e}")
-        await callback.message.answer("❌ خطا در انتشار. ربات ادمین است؟")
+        await callback.message.answer(f"❌ خطا: {e}")
 
 @dp.message()
 async def other_messages(message: types.Message):
     if not is_allowed(message.from_user.id): return
     await message.answer("❌ لطفاً محتوای معتبر ارسال کنید.")
 
-# -------------------------------------------------------------------
-# اجرا
-# -------------------------------------------------------------------
+# ---------- اجرا ----------
 async def main():
     await dp.start_polling(bot)
 
