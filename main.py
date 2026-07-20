@@ -2,7 +2,7 @@ import os
 import re
 import asyncio
 import logging
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -18,6 +18,7 @@ if not TOKEN:
     raise ValueError("❌ متغیر محیطی BOT_TOKEN تنظیم نشده است.")
 
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@spark_news_tel")
+ALLOWED_USER_ID = 8293164271   # فقط این شناسه مجاز به استفاده
 
 # -------------------------------------------------------------------
 # FSM
@@ -31,28 +32,38 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=storage)
 
 # -------------------------------------------------------------------
-# جمع‌آوری آلبوم‌ها (global)
+# Middleware برای محدود کردن کاربران
 # -------------------------------------------------------------------
-album_collector: Dict[str, Dict[str, Any]] = {}   # {media_group_id: {"messages": [...], "timer": task}}
+class AccessMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: types.TelegramObject, data: dict):
+        # استخراج شناسه کاربر از رویداد (چه پیام باشد چه کالبک)
+        user_id = None
+        if hasattr(event, 'from_user') and event.from_user:
+            user_id = event.from_user.id
+        # اگر کاربر مجاز نبود، پردازش متوقف می‌شود
+        if user_id != ALLOWED_USER_ID:
+            return
+        return await handler(event, data)
+
+# ثبت میدلور در دیسپچر
+dp.update.outer_middleware(AccessMiddleware())
 
 # -------------------------------------------------------------------
-# توابع کمکی
+# جمع‌آوری آلبوم‌ها
+# -------------------------------------------------------------------
+album_collector: Dict[str, Dict[str, Any]] = {}
+
+# -------------------------------------------------------------------
+# توابع کمکی (بدون تغییر)
 # -------------------------------------------------------------------
 def get_media_type(message: types.Message) -> str:
-    if message.photo:
-        return "photo"
-    elif message.video:
-        return "video"
-    elif message.audio:
-        return "audio"
-    elif message.document:
-        return "document"
-    elif message.voice:
-        return "voice"
-    elif message.video_note:
-        return "video_note"
-    elif message.text:
-        return "text"
+    if message.photo: return "photo"
+    if message.video: return "video"
+    if message.audio: return "audio"
+    if message.document: return "document"
+    if message.voice: return "voice"
+    if message.video_note: return "video_note"
+    if message.text: return "text"
     return "unknown"
 
 def extract_media_from_message(message: types.Message) -> Dict[str, Any]:
@@ -90,19 +101,16 @@ async def send_preview(
     caption: str,
     album: bool = False
 ) -> Dict[str, Any]:
-    """ارسال پیش‌نمایش (تکی یا آلبوم). در حالت آلبوم فقط پیام متنی برمی‌گرداند."""
     caption_text = caption if caption else '(بدون کپشن)'
     result = {"main_chat_id": target_message.chat.id, "main_message_id": None, "extra_message_id": None}
 
     if album:
-        # پیش‌نمایش آلبوم فقط یک پیام متنی با دکمه‌هاست
-        text = f"📸 **آلبوم** ({len(media_data['items'])} آیتم)\n\n{caption_text}"
+        text = f"📸 آلبوم ({len(media_data['items'])} آیتم)\n\n{caption_text}"
         msg = await target_message.answer(text, reply_markup=preview_keyboard())
         result["main_message_id"] = msg.message_id
         return result
 
     full_caption = f"📸 پیش‌نمایش پست\n\n{caption_text}"
-
     if media_type == "photo":
         msg = await target_message.answer_photo(media_data["file_id"], caption=full_caption, reply_markup=preview_keyboard())
         result["main_message_id"] = msg.message_id
@@ -146,8 +154,7 @@ def process_caption_for_publishing(caption: str) -> str:
     cleaned = re.sub(r"@\w+", "", cleaned)
     cleaned = re.sub(r"#\w+", "", cleaned)
     cleaned = cleaned.strip()
-    if cleaned:
-        cleaned += "\n"
+    if cleaned: cleaned += "\n"
     cleaned += "@spark_news_tel"
     return cleaned
 
@@ -162,19 +169,15 @@ def preview_keyboard():
     return builder.as_markup()
 
 # -------------------------------------------------------------------
-# پردازش آلبوم (بعد از تأخیر)
+# پردازش آلبوم
 # -------------------------------------------------------------------
 async def process_album(media_group_id: str, chat_id: int, bot_instance: Bot, state: FSMContext, message: types.Message):
-    """بعد از ۱ ثانیه همهٔ پیام‌های گروه را پردازش می‌کند."""
-    await asyncio.sleep(1)  # صبر برای دریافت همهٔ آیتم‌ها
+    await asyncio.sleep(1)
     group_data = album_collector.pop(media_group_id, None)
-    if not group_data:
-        return
+    if not group_data: return
     messages: List[types.Message] = group_data["messages"]
-    # مرتب‌سازی بر اساس message_id (اختیاری)
     messages.sort(key=lambda m: m.message_id)
 
-    # استخراج آیتم‌ها
     items = []
     caption = ""
     for msg in messages:
@@ -186,21 +189,13 @@ async def process_album(media_group_id: str, chat_id: int, bot_instance: Bot, st
                 item["width"] = msg.video.width
                 item["height"] = msg.video.height
             items.append(item)
-            # کپشن را از اولین پیامی که کپشن دارد برمی‌داریم
             if not caption and msg.caption:
                 caption = msg.caption
-    if not items:
-        return
+    if not items: return
 
-    # ذخیره در state
-    album_data = {
-        "type": "album",
-        "items": items,
-        "caption": caption,
-    }
+    album_data = {"type": "album", "items": items, "caption": caption}
     await state.update_data(media_type="album", media_data=album_data, caption=caption)
 
-    # ارسال پیش‌نمایش متنی
     preview_info = await send_preview(message, "album", album_data, caption, album=True)
     await state.update_data(
         preview_chat_id=preview_info["main_chat_id"],
@@ -215,7 +210,7 @@ async def process_album(media_group_id: str, chat_id: int, bot_instance: Bot, st
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("سلام! هر محتوایی بفرستید. آلبوم هم پشتیبانی می‌شود. /cancel برای لغو.")
+    await message.answer("سلام! فقط شما مجاز هستید. هر محتوایی بفرستید (آلبوم هم پشتیبانی می‌شود). /cancel برای لغو.")
 
 @dp.message(Command("cancel"))
 @dp.message(F.text.casefold() == "cancel")
@@ -225,24 +220,18 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ عملیات لغو شد.")
 
-# --- مدیریت آلبوم ---
 @dp.message(F.media_group_id)
 async def handle_album_item(message: types.Message, state: FSMContext):
     media_group_id = message.media_group_id
     if media_group_id not in album_collector:
         album_collector[media_group_id] = {"messages": [], "timer": None}
     album_collector[media_group_id]["messages"].append(message)
-
-    # فقط برای اولین پیام یک تایمر تنظیم کن
     if not album_collector[media_group_id]["timer"]:
-        # ایجاد تسک و ذخیره آن
         task = asyncio.create_task(process_album(media_group_id, message.chat.id, bot, state, message))
         album_collector[media_group_id]["timer"] = task
 
-# --- تک مدیا (بدون media_group_id) ---
 @dp.message(F.photo | F.video | F.audio | F.document | F.voice | F.video_note | F.text, ~F.media_group_id)
 async def handle_single_media(message: types.Message, state: FSMContext):
-    # اگر قبلاً پیش‌نمایشی بود پاک شود
     current_state = await state.get_state()
     if current_state is not None:
         data = await state.get_data()
@@ -252,8 +241,7 @@ async def handle_single_media(message: types.Message, state: FSMContext):
     media_type = get_media_type(message)
     media_data = extract_media_from_message(message)
     caption = message.caption or ""
-    if media_type == "text":
-        caption = media_data.get("text", "")
+    if media_type == "text": caption = media_data.get("text", "")
 
     await state.update_data(media_type=media_type, media_data=media_data, caption=caption)
     preview_info = await send_preview(message, media_type, media_data, caption)
@@ -264,15 +252,12 @@ async def handle_single_media(message: types.Message, state: FSMContext):
     )
     await state.set_state(Form.showing_preview)
 
-# --- ویرایش کپشن (مشترک بین تک و آلبوم) ---
 @dp.message(StateFilter(Form.waiting_for_caption), F.text)
 async def handle_new_caption(message: types.Message, state: FSMContext):
     new_caption = message.text
     user_data = await state.get_data()
     if not user_data:
-        await message.answer("داده‌ای یافت نشد.")
-        await state.clear()
-        return
+        await message.answer("داده‌ای یافت نشد."); await state.clear(); return
 
     media_type = user_data["media_type"]
     media_data = user_data["media_data"]
@@ -280,9 +265,7 @@ async def handle_new_caption(message: types.Message, state: FSMContext):
     main_msg_id = user_data.get("preview_main_message_id")
     extra_msg_id = user_data.get("preview_extra_message_id")
 
-    # پیش‌نمایش را به‌روز کن
     if media_type == "album":
-        # فقط متن پیش‌نمایش را ویرایش کن
         caption_text = new_caption if new_caption else '(بدون کپشن)'
         new_text = f"📸 آلبوم ({len(media_data['items'])} آیتم)\n\n{caption_text}"
         try:
@@ -294,7 +277,6 @@ async def handle_new_caption(message: types.Message, state: FSMContext):
         except Exception as e:
             logging.warning(f"edit album preview failed: {e}")
 
-    # برای انواع دیگر (همان کد قبلی)
     caption_text = new_caption if new_caption else '(بدون کپشن)'
     full_caption = f"📸 پیش‌نمایش پست\n\n{caption_text}"
 
@@ -308,45 +290,31 @@ async def handle_new_caption(message: types.Message, state: FSMContext):
         except Exception as e:
             logging.warning(f"edit_message_caption failed: {e}")
 
-    # fallback
     await delete_preview_messages(chat_id, main_msg_id, extra_msg_id)
-    if media_type == "text":
-        media_data["text"] = new_caption
-
+    if media_type == "text": media_data["text"] = new_caption
     new_info = await send_preview(message, media_type, media_data, new_caption)
     await state.update_data(caption=new_caption, preview_chat_id=new_info["main_chat_id"],
                            preview_main_message_id=new_info["main_message_id"], preview_extra_message_id=new_info.get("extra_message_id"), media_data=media_data)
     await message.answer("✅ کپشن ویرایش شد. پیش‌نمایش جدید را ببینید.")
     await state.set_state(Form.showing_preview)
 
-# لغو ویرایش در صورت فرستادن غیرمتن
 @dp.message(StateFilter(Form.waiting_for_caption))
 async def abort_caption_and_new_media(message: types.Message, state: FSMContext):
     await message.answer("⚠️ ویرایش کپشن لغو شد. محتوای جدید دریافت شد.")
     data = await state.get_data()
     await delete_preview_messages(data.get("preview_chat_id"), data.get("preview_main_message_id"), data.get("preview_extra_message_id"))
     await state.clear()
-    # حالا باید message را مجدداً پردازش کنیم. اگر media_group_id داشت به handle_album_item برود
-    # اما چون اینجا هندلر عمومی نیست، با صدا زدن مستقیم handle_any?
-    # ساده‌ترین راه: clear state و ارسال message به handler اصلی:
-    # چون message دوباره توسط dp بررسی می‌شود، اگر media_group_id داشته باشد به handle_album_item می‌رود
-    # پس نیازی به کار اضافه نیست.
-    # فقط state را clear کردیم و message را ignore می‌کنیم؟ نه، باید دوباره بررسی شود. ولی message از قبل توسط دیسپچر به این هندلر خورده و رد شده. نمی‌توان دوباره dispatch کرد.
-    # بنابراین بهتر است در اینجا خودمان message را پردازش کنیم.
     if message.media_group_id:
         await handle_album_item(message, state)
     else:
         await handle_single_media(message, state)
 
-# --- دکمه‌های پیش‌نمایش ---
 @dp.callback_query(F.data.in_(["post", "cancel_post", "edit_caption"]), StateFilter(Form.showing_preview))
 async def process_preview_actions(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     user_data = await state.get_data()
     if not user_data:
-        await callback.message.answer("داده‌ای یافت نشد.")
-        await state.clear()
-        return
+        await callback.message.answer("داده‌ای یافت نشد."); await state.clear(); return
 
     if callback.data == "post":
         media_type = user_data["media_type"]
@@ -356,7 +324,6 @@ async def process_preview_actions(callback: types.CallbackQuery, state: FSMConte
 
         try:
             if media_type == "album":
-                # ساخت InputMedia list
                 media_list = []
                 for idx, item in enumerate(media_data["items"]):
                     cap = final_caption if idx == 0 else ""
@@ -367,7 +334,6 @@ async def process_preview_actions(callback: types.CallbackQuery, state: FSMConte
                                                                 duration=item.get("duration"), width=item.get("width"), height=item.get("height")))
                 await bot.send_media_group(CHANNEL_ID, media=media_list)
             else:
-                # تک مدیا (کد قبلی)
                 if media_type == "photo":
                     await bot.send_photo(CHANNEL_ID, media_data["file_id"], caption=final_caption)
                 elif media_type == "video":
@@ -386,7 +352,6 @@ async def process_preview_actions(callback: types.CallbackQuery, state: FSMConte
                 elif media_type == "text":
                     await bot.send_message(CHANNEL_ID, final_caption)
 
-            # حذف پیش‌نمایش
             await delete_preview_messages(user_data["preview_chat_id"], user_data.get("preview_main_message_id"), user_data.get("preview_extra_message_id"))
             await callback.message.answer("✅ محتوا با موفقیت در کانال منتشر شد.")
         except Exception as e:
@@ -406,7 +371,7 @@ async def process_preview_actions(callback: types.CallbackQuery, state: FSMConte
 
 @dp.message()
 async def other_messages(message: types.Message):
-    await message.answer("❌ لطفاً محتوای معتبر ارسال کنید.")
+    pass  # برای کاربران غیرمجاز توسط میدلور متوقف می‌شود، اینجا فقط برای فرمالیته
 
 # -------------------------------------------------------------------
 # اجرا
