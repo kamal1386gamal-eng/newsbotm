@@ -34,6 +34,8 @@ def process_caption(caption: str) -> str:
     """پردازش نهایی کپشن پیش از ارسال به کانال"""
     if not caption:
         caption = ""
+    # حذف عبارت ثابت "🔴  | اخبار" با هر فاصله‌ای
+    caption = re.sub(r"🔴\s*\|\s*اخبار", "", caption)
     # اولین لینک را با آیدی کانال جایگزین کن
     if re.search(r"https?://\S+", caption):
         caption = re.sub(r"https?://\S+", "@spark_news_tel", caption, count=1)
@@ -68,7 +70,7 @@ async def delete_msg(chat_id: int, msg_id: Optional[int]):
             pass
 
 
-# ══════════════ ساخت پیش‌نمایش اولیه (بدون ویرایش) ══════════════
+# ══════════════ ساخت پیش‌نمایش اولیه ══════════════
 
 async def create_single_preview(message: types.Message):
     original_caption = message.caption or message.text or ""
