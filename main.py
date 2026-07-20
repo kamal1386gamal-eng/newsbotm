@@ -15,12 +15,12 @@ from aiogram.types import (
 )
 
 # ═══════════════ تنظیمات از محیط ═══════════════
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHANNEL = "@spark_news_tel"  # یا شناسه عددی کانال
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("متغیر محیطی BOT_TOKEN تنظیم نشده است")
 
-# لیست کاربران مجاز (از متغیر محیطی یا پیش‌فرض)
+CHANNEL = os.environ.get("CHANNEL", "@spark_news_tel")
 ALLOWED_USERS = list(map(int, os.environ.get("ALLOWED_USERS", "8293164271").split(",")))
-
 STATE_TTL = 600  # ثانیه
 
 # ═══════════════ راه‌اندازی ربات ═══════════════
@@ -86,7 +86,6 @@ def get_caption_and_entities(msg: Message):
     return "", None
 
 # ═══════════════ مدیریت آلبوم (ذخیره موقت) ═══════════════
-# ساختار: {user_id: {group_id: {"messages": [msg, ...], "task": asyncio.Task}}}
 media_group_storage: Dict[int, Dict[str, Dict]] = {}
 
 async def process_media_group(user_id: int, messages: List[Message], state: FSMContext):
@@ -110,14 +109,12 @@ async def delayed_process(user_id: int, group_id: str):
     store = media_group_storage[user_id][group_id]
     messages = sorted(store["messages"], key=lambda m: m.message_id)
 
-    # ایجاد یک نمونه جدید از FSMContext برای این کاربر
     state = FSMContext(
         storage=dp.storage,
         key=StorageKey(bot_id=bot.id, user_id=user_id, chat_id=user_id)
     )
     await process_media_group(user_id, messages, state)
 
-    # پاک‌سازی
     del media_group_storage[user_id][group_id]
     if not media_group_storage[user_id]:
         del media_group_storage[user_id]
@@ -197,14 +194,12 @@ async def handle_forward(msg: Message, state: FSMContext):
     if not is_allowed(user_id):
         return
 
-    # بررسی انقضای جلسه
     data = await state.get_data()
     if data and time.time() - data.get("last_activity", 0) > STATE_TTL:
         await state.clear()
         await msg.answer("⏰ جلسه قبلی منقضی شد. لطفاً دوباره فوروارد کنید.")
         return
 
-    # مدیریت آلبوم
     if msg.media_group_id:
         group_id = msg.media_group_id
         if user_id not in media_group_storage:
@@ -221,7 +216,6 @@ async def handle_forward(msg: Message, state: FSMContext):
         await state.update_data(last_activity=time.time())
         return
 
-    # تک پیام
     caption, entities = get_caption_and_entities(msg)
     await state.update_data(
         messages=[msg],
@@ -244,15 +238,15 @@ async def handle_preview_buttons(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
 
     if not data:
-        await call.message.edit_text("⛔ داده‌ای یافت نشد. دوباره فوروارد کنید.")
+        # ارسال پیام جدید به جای ویرایش پیام بدون متن
+        await call.message.answer("⛔ داده‌ای یافت نشد. دوباره فوروارد کنید.")
         return
 
     if call.data == "confirm":
         if data.get("published"):
-            await call.message.edit_text("⚠️ این پست قبلاً منتشر شده است.")
+            await call.message.answer("⚠️ این پست قبلاً منتشر شده است.")
             return
 
-        # انتشار
         await state.update_data(published=True)
         messages = data["messages"]
         caption = data["caption"]
@@ -265,7 +259,7 @@ async def handle_preview_buttons(call: CallbackQuery, state: FSMContext):
                     await bot.send_media_group(CHANNEL, media_inputs)
             else:
                 msg = messages[0]
-                final_caption = build_final_caption(caption)  # کپشن پاک‌شده + لینک کانال
+                final_caption = build_final_caption(caption)
                 media_type = get_media_type(msg)
                 if media_type == "photo":
                     await bot.send_photo(CHANNEL, msg.photo[-1].file_id, caption=final_caption)
@@ -282,21 +276,19 @@ async def handle_preview_buttons(call: CallbackQuery, state: FSMContext):
                 elif media_type == "video_note":
                     await bot.send_video_note(CHANNEL, msg.video_note.file_id)
 
-            # حذف پیام‌های پیش‌نمایش
             try:
                 await call.message.delete()
             except:
                 pass
             await bot.send_message(user_id, "✅ پست با موفقیت در کانال منتشر شد.")
-
         except Exception as e:
-            await call.message.edit_text(f"❌ خطا در انتشار: {e}")
+            await call.message.answer(f"❌ خطا در انتشار: {e}")
         finally:
             await state.clear()
 
     elif call.data == "edit":
         await state.set_state(PostState.waiting_for_caption)
-        await call.message.edit_text("✏️ کپشن جدید را به‌صورت یک پیام متنی ارسال کنید.")
+        await call.message.answer("✏️ کپشن جدید را به‌صورت یک پیام متنی ارسال کنید.")
 
     elif call.data == "cancel":
         preview_id = data.get("preview_msg_id")
@@ -306,7 +298,7 @@ async def handle_preview_buttons(call: CallbackQuery, state: FSMContext):
             except:
                 pass
         await state.clear()
-        await call.message.edit_text("❌ عملیات لغو شد.")
+        await call.message.answer("❌ عملیات لغو شد.")
 
 # ═══════════════ هندلر: دریافت کپشن جدید (حالت ویرایش) ═══════════════
 @dp.message(PostState.waiting_for_caption)
@@ -317,17 +309,15 @@ async def receive_new_caption(msg: Message, state: FSMContext):
 
     new_caption = msg.text or msg.caption or ""
     try:
-        await msg.delete()  # حذف پیام کاربر (اختیاری)
+        await msg.delete()
     except:
         pass
 
     await state.update_data(caption=new_caption, entities=None, last_activity=time.time())
-    # دوباره پیش‌نمایش را نشان می‌دهیم (حالت FSM همچنان active است)
     try:
         await send_preview(user_id, state)
     except Exception as e:
         await bot.send_message(user_id, f"❌ خطا در نمایش پیش‌نمایش: {e}")
-    # لازم نیست state را پاک کنیم چون کاربر می‌تواند دوباره ویرایش کند یا تایید کند
 
 # ═══════════════ راه‌اندازی ═══════════════
 async def main():
