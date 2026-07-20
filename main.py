@@ -10,7 +10,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from typing import Dict, Any, List, Optional
 
+# -------------------------------------------------------------------
 # تنظیمات
+# -------------------------------------------------------------------
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -18,7 +20,7 @@ if not TOKEN:
     raise ValueError("❌ متغیر محیطی BOT_TOKEN تنظیم نشده است.")
 
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@spark_news_tel")
-ALLOWED_USER_ID = 8293164271   # فقط این شناسه مجاز به استفاده
+ALLOWED_USER_ID = 8293164271        # فقط این کاربر مجاز است
 
 # -------------------------------------------------------------------
 # FSM
@@ -36,16 +38,13 @@ dp = Dispatcher(storage=storage)
 # -------------------------------------------------------------------
 class AccessMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: types.TelegramObject, data: dict):
-        # استخراج شناسه کاربر از رویداد (چه پیام باشد چه کالبک)
         user_id = None
         if hasattr(event, 'from_user') and event.from_user:
             user_id = event.from_user.id
-        # اگر کاربر مجاز نبود، پردازش متوقف می‌شود
         if user_id != ALLOWED_USER_ID:
-            return
+            return  # بی‌صدا ignore می‌شود
         return await handler(event, data)
 
-# ثبت میدلور در دیسپچر
 dp.update.outer_middleware(AccessMiddleware())
 
 # -------------------------------------------------------------------
@@ -54,16 +53,16 @@ dp.update.outer_middleware(AccessMiddleware())
 album_collector: Dict[str, Dict[str, Any]] = {}
 
 # -------------------------------------------------------------------
-# توابع کمکی (بدون تغییر)
+# توابع کمکی
 # -------------------------------------------------------------------
 def get_media_type(message: types.Message) -> str:
-    if message.photo: return "photo"
-    if message.video: return "video"
-    if message.audio: return "audio"
-    if message.document: return "document"
-    if message.voice: return "voice"
-    if message.video_note: return "video_note"
-    if message.text: return "text"
+    if message.photo:        return "photo"
+    if message.video:        return "video"
+    if message.audio:        return "audio"
+    if message.document:     return "document"
+    if message.voice:        return "voice"
+    if message.video_note:   return "video_note"
+    if message.text:         return "text"
     return "unknown"
 
 def extract_media_from_message(message: types.Message) -> Dict[str, Any]:
@@ -111,6 +110,7 @@ async def send_preview(
         return result
 
     full_caption = f"📸 پیش‌نمایش پست\n\n{caption_text}"
+
     if media_type == "photo":
         msg = await target_message.answer_photo(media_data["file_id"], caption=full_caption, reply_markup=preview_keyboard())
         result["main_message_id"] = msg.message_id
@@ -150,11 +150,13 @@ async def delete_preview_messages(chat_id: int, main_msg_id: Optional[int], extr
         except Exception as e: logging.warning(f"Could not delete extra: {e}")
 
 def process_caption_for_publishing(caption: str) -> str:
+    # حذف همه لینک‌ها، منشن‌ها و هشتگ‌ها
     cleaned = re.sub(r"https?://\S+", "", caption)
     cleaned = re.sub(r"@\w+", "", cleaned)
     cleaned = re.sub(r"#\w+", "", cleaned)
     cleaned = cleaned.strip()
-    if cleaned: cleaned += "\n"
+    if cleaned:
+        cleaned += "\n"
     cleaned += "@spark_news_tel"
     return cleaned
 
@@ -174,7 +176,8 @@ def preview_keyboard():
 async def process_album(media_group_id: str, chat_id: int, bot_instance: Bot, state: FSMContext, message: types.Message):
     await asyncio.sleep(1)
     group_data = album_collector.pop(media_group_id, None)
-    if not group_data: return
+    if not group_data:
+        return
     messages: List[types.Message] = group_data["messages"]
     messages.sort(key=lambda m: m.message_id)
 
@@ -191,7 +194,8 @@ async def process_album(media_group_id: str, chat_id: int, bot_instance: Bot, st
             items.append(item)
             if not caption and msg.caption:
                 caption = msg.caption
-    if not items: return
+    if not items:
+        return
 
     album_data = {"type": "album", "items": items, "caption": caption}
     await state.update_data(media_type="album", media_data=album_data, caption=caption)
@@ -210,7 +214,7 @@ async def process_album(media_group_id: str, chat_id: int, bot_instance: Bot, st
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("سلام! فقط شما مجاز هستید. هر محتوایی بفرستید (آلبوم هم پشتیبانی می‌شود). /cancel برای لغو.")
+    await message.answer("سلام! فقط شما مجاز به استفاده هستید. هر محتوایی بفرستید (آلبوم هم پشتیبانی می‌شود). /cancel برای لغو.")
 
 @dp.message(Command("cancel"))
 @dp.message(F.text.casefold() == "cancel")
@@ -241,7 +245,8 @@ async def handle_single_media(message: types.Message, state: FSMContext):
     media_type = get_media_type(message)
     media_data = extract_media_from_message(message)
     caption = message.caption or ""
-    if media_type == "text": caption = media_data.get("text", "")
+    if media_type == "text":
+        caption = media_data.get("text", "")
 
     await state.update_data(media_type=media_type, media_data=media_data, caption=caption)
     preview_info = await send_preview(message, media_type, media_data, caption)
@@ -291,7 +296,9 @@ async def handle_new_caption(message: types.Message, state: FSMContext):
             logging.warning(f"edit_message_caption failed: {e}")
 
     await delete_preview_messages(chat_id, main_msg_id, extra_msg_id)
-    if media_type == "text": media_data["text"] = new_caption
+    if media_type == "text":
+        media_data["text"] = new_caption
+
     new_info = await send_preview(message, media_type, media_data, new_caption)
     await state.update_data(caption=new_caption, preview_chat_id=new_info["main_chat_id"],
                            preview_main_message_id=new_info["main_message_id"], preview_extra_message_id=new_info.get("extra_message_id"), media_data=media_data)
@@ -371,7 +378,8 @@ async def process_preview_actions(callback: types.CallbackQuery, state: FSMConte
 
 @dp.message()
 async def other_messages(message: types.Message):
-    pass  # برای کاربران غیرمجاز توسط میدلور متوقف می‌شود، اینجا فقط برای فرمالیته
+    # این بخش فقط برای کاربران مجاز اجرا می‌شود، در غیر این صورت میدلور متوقف کرده است
+    await message.answer("❌ لطفاً محتوای معتبر ارسال کنید.")
 
 # -------------------------------------------------------------------
 # اجرا
